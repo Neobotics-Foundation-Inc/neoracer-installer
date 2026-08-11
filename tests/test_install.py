@@ -146,6 +146,36 @@ def test_log_records_diagnostic_verdicts(sandbox: tuple[Path, Path]) -> None:
     assert "INSTALLATION SUMMARY" in log_text
 
 
+def test_driver_version_reported_before_and_after(sandbox: tuple[Path, Path]) -> None:
+    home, script = sandbox
+    out = run_installer(home, script, "--dry-run", "--yes").stdout
+    assert out.count("Driver version") == 2, "version block missing before or after the run"
+    assert "  installed:  none" in out
+    assert "  incoming:   not checked (dry run)" in out
+    assert "  previous:   none" in out
+
+
+def test_driver_version_block_precedes_removal(script_source: str) -> None:
+    version_block = script_source.index('log "Driver version"')
+    removal = script_source.index("[1/3] Removing existing systems and code")
+    assert version_block < removal
+
+
+def test_driver_revisions_compared_by_full_sha(script_source: str) -> None:
+    # Short SHAs widen when a prefix is ambiguous, so equality tests must use
+    # the full hashes.
+    assert '[ "$DRIVER_SHA_BEFORE" = "$DRIVER_REMOTE_HEAD" ]' in script_source
+    assert '[ "$DRIVER_SHA_AFTER" = "$DRIVER_REMOTE_HEAD" ]' in script_source
+
+
+def test_state_captures_driver_version_fields(sandbox: tuple[Path, Path]) -> None:
+    home, script = sandbox
+    run_installer(home, script, "--dry-run", "--yes")
+    log_text = next((script.parent.parent / "logs").glob("install_*.log")).read_text()
+    for key in ("ws.driver_version=", "ws.driver_branch=", "ws.driver_commit_date="):
+        assert f"[STATE:before] {key}" in log_text
+
+
 def test_log_holds_before_and_after_state(sandbox: tuple[Path, Path]) -> None:
     home, script = sandbox
     run_installer(home, script, "--dry-run", "--yes")

@@ -9,7 +9,7 @@
 # Usage: bash neoracer-installer/scripts/install.sh [-y] [--dry-run]
 
 # static variables
-INSTALLER_VERSION="0.2.0"
+INSTALLER_VERSION="0.2.1"
 DRIVER_URL="https://github.com/Neobotics-Foundation-Inc/neoracer_ros2_driver.git"
 DRIVER_NAME="neoracer_ros2_driver"
 LIDAR_NAME="lakibeam1"
@@ -162,6 +162,27 @@ emit() {
     printf '%s=%s\n' "$1" "${2:-unknown}"
 }
 
+# One human-readable line describing the revision a checkout sits on:
+# "9c6902a (v1.2.0, 2026-08-05) Merge pull request #15 from ...". The tag is
+# included only when HEAD is exactly on one. Returns non-zero if the directory
+# is not a git checkout, so callers can distinguish "absent" from "unreadable".
+describe_checkout() {
+    local dir="$1"
+    [ -d "${dir}/.git" ] || return 1
+
+    local rev date subject tag
+    rev=$(git -C "$dir" rev-parse --short HEAD 2>/dev/null) || return 1
+    date=$(git -C "$dir" log -1 --format='%cs' 2>/dev/null)
+    subject=$(git -C "$dir" log -1 --format='%s' 2>/dev/null | cut -c1-60)
+    tag=$(git -C "$dir" describe --tags --exact-match HEAD 2>/dev/null)
+
+    if [ -n "$tag" ]; then
+        printf '%s (%s, %s) %s' "$rev" "$tag" "${date:-unknown date}" "$subject"
+    else
+        printf '%s (%s) %s' "$rev" "${date:-unknown date}" "$subject"
+    fi
+}
+
 # Device-tree strings are NUL-terminated.
 dt_read() {
     [ -r "$1" ] && tr -d '\0' < "$1"
@@ -263,10 +284,17 @@ PYEOF
     emit "ws.installer_version" "$INSTALLER_VERSION"
     emit "ws.installer_rev" "$(git -C "$INSTALLER_DIR" rev-parse --short HEAD 2>/dev/null)"
     if [ -d "${SRC_DIR}/${DRIVER_NAME}/.git" ]; then
-        emit "ws.driver_rev" "$(git -C "${SRC_DIR}/${DRIVER_NAME}" rev-parse --short HEAD 2>/dev/null)"
-        emit "ws.driver_dirty" "$([ -n "$(git -C "${SRC_DIR}/${DRIVER_NAME}" status --porcelain 2>/dev/null)" ] && echo yes || echo no)"
+        local driver_dir="${SRC_DIR}/${DRIVER_NAME}"
+        emit "ws.driver_rev" "$(git -C "$driver_dir" rev-parse --short HEAD 2>/dev/null)"
+        emit "ws.driver_version" "$(describe_checkout "$driver_dir")"
+        emit "ws.driver_branch" "$(git -C "$driver_dir" rev-parse --abbrev-ref HEAD 2>/dev/null)"
+        emit "ws.driver_commit_date" "$(git -C "$driver_dir" log -1 --format='%cs' 2>/dev/null)"
+        emit "ws.driver_dirty" "$([ -n "$(git -C "$driver_dir" status --porcelain 2>/dev/null)" ] && echo yes || echo no)"
     else
         emit "ws.driver_rev" "absent"
+        emit "ws.driver_version" "absent"
+        emit "ws.driver_branch" "absent"
+        emit "ws.driver_commit_date" "absent"
         emit "ws.driver_dirty" "absent"
     fi
     if [ -d "${SRC_DIR}/${LIDAR_NAME}/.git" ]; then
@@ -403,8 +431,13 @@ log "       device:   ${STATE_MODEL:-unknown}"
 log "       serial:   ${STATE_SERIAL:-unknown}"
 log "       hostname: ${STATE_HOST:-unknown}"
 
+DRIVER_REMOTE_HEAD=""
 if [ "$DRY_RUN" = false ]; then
-    if ! GIT_TERMINAL_PROMPT=0 git ls-remote --exit-code -h "$DRIVER_URL" >/dev/null 2>&1; then
+    # One call does double duty: it proves the repository is reachable and
+    # names the revision the clone in step 3 will land on, so the incoming
+    # version can be shown before anything is erased.
+    DRIVER_REMOTE_HEAD=$(GIT_TERMINAL_PROMPT=0 git ls-remote "$DRIVER_URL" HEAD 2>/dev/null | awk 'NR==1 {print $1}')
+    if [ -z "$DRIVER_REMOTE_HEAD" ]; then
         echo -e "\e[1;31m[ERROR] Cannot reach the driver repository:\e[0m"
         log "  $DRIVER_URL"
         log "Connect the car to the internet and run the installer again."
@@ -416,6 +449,44 @@ if [ "$DRY_RUN" = false ]; then
 else
     log "  [dry-run] skipping driver repository reachability check"
 fi
+
+# ============================================================================
+# Driver version, before the erase
+#
+# The installed revision comes from the checkout about to be deleted; the
+# incoming one from the remote HEAD resolved above. Both are shown before the
+# confirmation prompt so the operator sees what the run replaces and with what.
+# ============================================================================
+DRIVER_VERSION_BEFORE=$(describe_checkout "${SRC_DIR}/${DRIVER_NAME}") || DRIVER_VERSION_BEFORE=""
+DRIVER_REV_BEFORE="${DRIVER_VERSION_BEFORE%% *}"
+# Compare full SHAs; rev-parse --short widens beyond 7 characters whenever a
+# prefix is ambiguous, so short forms are for display only.
+DRIVER_SHA_BEFORE=$(git -C "${SRC_DIR}/${DRIVER_NAME}" rev-parse HEAD 2>/dev/null)
+DRIVER_REMOTE_SHORT="${DRIVER_REMOTE_HEAD:0:7}"
+
+log ""
+echo -e "\e[1;36m==========================================================================\e[0m"
+log "Driver version"
+echo -e "\e[1;36m==========================================================================\e[0m"
+if [ -n "$DRIVER_VERSION_BEFORE" ]; then
+    log "  installed:  ${DRIVER_VERSION_BEFORE}"
+else
+    log "  installed:  none (no driver checkout at ${SRC_DIR}/${DRIVER_NAME})"
+fi
+
+if [ "$DRY_RUN" = true ]; then
+    log "  incoming:   not checked (dry run)"
+elif [ -z "$DRIVER_VERSION_BEFORE" ]; then
+    log "  incoming:   ${DRIVER_REMOTE_SHORT} (remote HEAD)"
+    log "  status:     first install"
+elif [ "$DRIVER_SHA_BEFORE" = "$DRIVER_REMOTE_HEAD" ]; then
+    log "  incoming:   ${DRIVER_REMOTE_SHORT} (remote HEAD)"
+    log "  status:     already at the newest revision; the run rebuilds it from scratch"
+else
+    log "  incoming:   ${DRIVER_REMOTE_SHORT} (remote HEAD)"
+    log "  status:     update available (${DRIVER_REV_BEFORE} -> ${DRIVER_REMOTE_SHORT})"
+fi
+log_silent "Driver remote HEAD: ${DRIVER_REMOTE_HEAD:-unknown}"
 
 # The driver's setup scripts call sudo throughout. Prompt for the password now,
 # while the car still has its old software, instead of 20 minutes in.
@@ -617,6 +688,33 @@ else
 fi
 
 # ============================================================================
+# Driver version, after the run
+# ============================================================================
+DRIVER_VERSION_AFTER=$(describe_checkout "${SRC_DIR}/${DRIVER_NAME}") || DRIVER_VERSION_AFTER=""
+DRIVER_REV_AFTER="${DRIVER_VERSION_AFTER%% *}"
+DRIVER_SHA_AFTER=$(git -C "${SRC_DIR}/${DRIVER_NAME}" rev-parse HEAD 2>/dev/null)
+
+log ""
+echo -e "\e[1;36m==========================================================================\e[0m"
+log "Driver version"
+echo -e "\e[1;36m==========================================================================\e[0m"
+log "  previous:   ${DRIVER_VERSION_BEFORE:-none}"
+if [ -n "$DRIVER_VERSION_AFTER" ]; then
+    log "  installed:  ${DRIVER_VERSION_AFTER}"
+    if [ -z "$DRIVER_VERSION_BEFORE" ]; then
+        log "  result:     driver installed at ${DRIVER_REV_AFTER}"
+    elif [ "$DRIVER_SHA_BEFORE" = "$DRIVER_SHA_AFTER" ]; then
+        log "  result:     unchanged; the car was already on ${DRIVER_REV_AFTER}"
+    else
+        log "  result:     updated ${DRIVER_REV_BEFORE} -> ${DRIVER_REV_AFTER}"
+    fi
+elif [ "$DRY_RUN" = true ]; then
+    log "  installed:  not cloned (dry run)"
+else
+    log "  installed:  none; the clone did not complete"
+fi
+
+# ============================================================================
 # Post-install state and diagnostics
 #
 # The second snapshot runs before the checks so the diff describes the car the
@@ -695,10 +793,22 @@ fi
 section "Step 3: driver checkout"
 
 if [ -d "${SRC_DIR}/${DRIVER_NAME}/.git" ]; then
-    DRIVER_REV=$(git -C "${SRC_DIR}/${DRIVER_NAME}" rev-parse --short HEAD 2>/dev/null)
-    check_pass "${DRIVER_NAME} cloned (${DRIVER_REV:-unknown revision})"
+    DRIVER_REV="$DRIVER_REV_AFTER"
+    check_pass "${DRIVER_NAME} cloned (${DRIVER_VERSION_AFTER:-unknown revision})"
 else
     check_fail "${DRIVER_NAME} not cloned into ${SRC_DIR}"
+fi
+
+# The clone should land on the revision preflight advertised. A mismatch means
+# the branch moved mid-run, so the car is not on the version the operator saw.
+if [ -z "$DRIVER_REMOTE_HEAD" ]; then
+    : # dry run, or the remote was never queried
+elif [ -z "$DRIVER_SHA_AFTER" ]; then
+    check_fail "driver revision unverifiable; expected ${DRIVER_REMOTE_SHORT}"
+elif [ "$DRIVER_SHA_AFTER" = "$DRIVER_REMOTE_HEAD" ]; then
+    check_pass "driver is at the revision advertised before the run (${DRIVER_REMOTE_SHORT})"
+else
+    check_warn "driver landed on ${DRIVER_REV_AFTER}, not the ${DRIVER_REMOTE_SHORT} advertised at preflight (the branch moved mid-run)"
 fi
 
 if [ -f "$SETUP_SCRIPT" ]; then
@@ -926,7 +1036,7 @@ INSTALL_SECONDS=$((INSTALL_DURATION % 60))
 log ""
 echo -e "\e[1;36m======================== INSTALLATION SUMMARY ========================\e[0m"
 echo -e "  Installer:        \e[1mv${INSTALLER_VERSION}\e[0m"
-echo -e "  Driver:           \e[1m${DRIVER_NAME} ${DRIVER_REV:-not cloned}\e[0m"
+echo -e "  Driver:           \e[1m${DRIVER_NAME} ${DRIVER_REV:-not cloned}\e[0m (was ${DRIVER_REV_BEFORE:-none})"
 echo -e "  Workspace:        \e[1m${WS_DIR}\e[0m"
 echo -e "  Checks:           \e[1m${PASS}/${TOTAL} passed, ${WARN} warning(s)\e[0m"
 echo -e "  Log file:         \e[1m${LOG_FILE}\e[0m"
@@ -935,7 +1045,7 @@ echo -e "\e[1;36m===============================================================
 
 log_silent "======================== INSTALLATION SUMMARY ========================"
 log_silent "  Installer:        v${INSTALLER_VERSION}"
-log_silent "  Driver:           ${DRIVER_NAME} ${DRIVER_REV:-not cloned}"
+log_silent "  Driver:           ${DRIVER_NAME} ${DRIVER_REV:-not cloned} (was ${DRIVER_REV_BEFORE:-none})"
 log_silent "  Workspace:        ${WS_DIR}"
 log_silent "  Checks:           ${PASS}/${TOTAL} passed, ${WARN} warning(s)"
 log_silent "  Log file:         ${LOG_FILE}"

@@ -11,6 +11,7 @@ Target hardware: Jetson Orin Nano, JetPack 6.x / Ubuntu 22.04 (Jammy), ROS2 Humb
 - [Usage](#usage)
 - [Options](#options)
 - [Run steps](#run-steps)
+  - [Driver version reporting](#driver-version-reporting)
 - [Diagnostics](#diagnostics)
 - [Logs](#logs)
   - [System state](#system-state)
@@ -98,6 +99,37 @@ aborted. A `--dry-run` always exits 0.
 Preflight checks run before step 1: sudo rights, the presence of `git` and
 `curl`, and a reachability probe of the driver repository. A car that cannot
 reach GitHub is stopped with its old software still intact.
+
+### Driver version reporting
+
+The driver revision is reported twice. Before the confirmation prompt, the
+installer prints the revision of the checkout it is about to delete and the
+revision the clone will land on, read from the remote with `git ls-remote`
+without cloning anything:
+
+```
+Driver version
+  installed:  9c6902a (v0.4.2, 2026-08-07) Merge pull request #15 from ...
+  incoming:   1f4ab90 (remote HEAD)
+  status:     update available (9c6902a -> 1f4ab90)
+```
+
+`status` reads `first install` when no checkout is present, and `already at the
+newest revision` when the car is current, in which case the run still rebuilds
+from scratch. After the driver setup returns, the same block reports `previous`,
+`installed`, and a `result` line naming the transition.
+
+Each revision line carries the short SHA, the exact tag when HEAD sits on one,
+the commit date, and the commit subject. Revisions are compared as full SHAs;
+the short forms are for display only, since `git rev-parse --short` widens
+whenever a prefix is ambiguous.
+
+A diagnostic confirms the clone landed on the revision preflight advertised. A
+mismatch is a warning rather than a failure: it means the branch moved between
+preflight and the clone, so the car is on a newer revision than the one the
+operator saw. The state snapshots carry the same facts as
+`ws.driver_version`, `ws.driver_rev`, `ws.driver_branch`, and
+`ws.driver_commit_date`, so the diff shows the revision change on its own.
 
 ## Diagnostics
 
@@ -228,6 +260,10 @@ See [architecture.md](architecture.md).
 ## Changelog
 
 Latest entries; full history in [changelog.md](changelog.md).
+
+### [0.2.1] - 2026-08-10
+- Added: driver revision reported before the erase (installed vs incoming remote HEAD) and again after the setup (previous vs installed).
+- Added: diagnostic confirming the clone landed on the revision advertised at preflight.
 
 ### [0.2.0] - 2026-08-10
 - Added: system-state snapshots before and after the run, logged as `[STATE:before]`, `[STATE:after]`, and `[STATE:diff]`.
