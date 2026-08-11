@@ -13,6 +13,7 @@ directory is the only thing a run leaves behind in this repository.
 | Module (path)            | Responsibility                                                        | Depends on                          |
 | ------------------------ | --------------------------------------------------------------------- | ----------------------------------- |
 | `scripts/install.sh`     | Preflight, confirmation, three run steps, diagnostics, summary         | git, curl, sudo, systemctl          |
+| `capture_state` (same)   | One `key=value` line per fact; snapshotted before and after, then diffed | lsblk, lsusb, ip, dpkg, python3   |
 | `logs/`                  | One timestamped log per run, never rotated                            | written by `install.sh`             |
 | `tests/test_install.py`  | Dry-run behavior and guard coverage                                   | pytest, bash                        |
 | `neoracer_ros2_driver`   | The actual install, in eight phases behind `scripts/setup_all.sh`     | cloned into `~/ros2_ws/src` at run  |
@@ -20,10 +21,11 @@ directory is the only thing a run leaves behind in this repository.
 ## Run pipeline
 
 ```
-preflight (root, tools, repo reachable, sudo)
+preflight (root, tools, state snapshot "before", repo reachable, sudo)
    |
    v
 confirmation  ---- declined ----> exit 1, nothing removed
+                                  (the "before" snapshot is kept)
    |
    v
 [1/3] remove  ~/jupyter_ws  ~/ros2_ws  ~/data  ~/logs
@@ -40,7 +42,10 @@ confirmation  ---- declined ----> exit 1, nothing removed
               [4/8] udev rules       [8/8] systemd services
    |
    v
-diagnostics -> summary -> reboot notice -> exit 0 or 1
+state snapshot "after" -> [STATE:diff] -> diagnostics -> summary
+   |
+   v
+reboot notice -> exit 0 or 1
 ```
 
 ## Interfaces
@@ -53,6 +58,10 @@ diagnostics -> summary -> reboot notice -> exit 0 or 1
   state during diagnostics. Never starts them, so nothing launches mid-install.
 - **sudo.** Authenticated once in preflight and refreshed by a background
   keepalive for the length of the run; the keepalive is killed on exit.
+- **State sources.** `/proc/device-tree` (model, board serial, compatible),
+  `/etc/machine-id`, `/etc/nv_tegra_release`, `/sys/class/net/*/address`,
+  `lsblk`, `lsusb`, `ip`, `dpkg-query`, and `importlib.metadata`. All read-only.
+  Device identifiers are collected; credentials and Wi-Fi secrets are not.
 
 ## Design constraints
 
@@ -71,3 +80,8 @@ diagnostics -> summary -> reboot notice -> exit 0 or 1
   hardware, are warnings rather than failures.
 - **Failure visibility.** The run continues to diagnostics even when the driver
   setup exits non-zero, so the operator sees exactly which components landed.
+- **State fidelity.** A fact that cannot be read is recorded as `unknown` rather
+  than omitted, so a key missing from the diff means the fact itself changed and
+  not that the probe failed. `host.uptime_s` is excluded from the diff because
+  it always moves; disk and directory sizes are kept because their movement is
+  the install's footprint.
