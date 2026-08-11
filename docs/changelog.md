@@ -1,0 +1,27 @@
+# Changelog
+
+All notable changes to this project. Format: Keep a Changelog
+(keepachangelog.com). Versioning: Semantic Versioning (semver.org).
+
+## [Unreleased]
+
+### Added
+### Changed
+### Fixed
+### Removed
+
+## [0.1.0] - 2026-08-10
+
+### Added
+- `scripts/install.sh`: four-step erase-and-reinstall run (remove the four car directories, recreate them, clone `neoracer_ros2_driver` and run its `setup_all.sh`, probe the neobotics.org account link).
+- Preflight checks ahead of any removal: root refusal, required tools, driver-repository reachability, sudo authentication with a keepalive for the run.
+- Confirmation prompt listing each directory and its size, with `-y` for non-interactive runs and `--dry-run` for a rehearsal.
+- Removal guard: one explicit path per call, symlinks resolved, `/` and `$HOME` and anything outside `$HOME` refused; core services stopped before removal.
+- Post-install diagnostics covering the workspace layout, driver checkout, and all eight driver phases, with `[PASS]` / `[FAIL]` / `[WARN]` verdicts and a summary.
+- Per-run logging to `logs/install_<timestamp>.log`, carrying system info, every command and its output, and all diagnostic verdicts.
+- Reboot notice explaining why group membership, udev symlinks, and services need a boot to take effect.
+- pytest suite covering the dry-run path, log behavior, diagnostic coverage, and the removal guards.
+- `README.md`, `docs/architecture.md`, and this changelog.
+
+### Known gaps
+- Step 4 does not link the car to a neobotics.org account; the API is unspecified, so the step only probes reachability and reports the link as pending.
