@@ -26,17 +26,41 @@ For Jetson Orin Nano and Orin NX running JetPack 6.x (Ubuntu 22.04) with ROS2 Hu
 
 ## Installation
 
-1. `cd` into your home folder: `cd ~`
-2. Run `git clone https://github.com/Neobotics-Foundation-Inc/neoracer-installer.git`
-3. Run `bash neoracer-installer/scripts/install.sh`
+1. `cd` into your home folder:
+
+    ```bash
+    cd ~
+    ```
+
+2. Clone the installer:
+
+    ```bash
+    git clone https://github.com/Neobotics-Foundation-Inc/neoracer-installer.git
+    ```
+
+3. Run the installer:
+
+    ```bash
+    bash neoracer-installer/scripts/install.sh
+    ```
+
     - Review the directories it lists and type `yes` to confirm the erase
     - Enter your sudo password once when prompted
     - Wait 30 to 60 minutes while the driver, ROS2, and the GPU stack install
-4. Run `sudo reboot` when the script tells you to. Group membership, udev
-   symlinks, and the car's services only take effect on the next boot.
 
-To see what the installer would do without changing anything, run
-`bash neoracer-installer/scripts/install.sh --dry-run` first.
+4. Reboot when the script tells you to. Group membership, udev symlinks, and
+   the car's services only take effect on the next boot.
+
+    ```bash
+    sudo reboot
+    ```
+
+To see what the installer would do without changing anything, run it with the
+`--dry-run` flag first:
+
+```bash
+bash neoracer-installer/scripts/install.sh --dry-run
+```
 
 ## Expected result
 
