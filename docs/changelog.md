@@ -10,6 +10,22 @@ All notable changes to this project. Format: Keep a Changelog
 ### Fixed
 ### Removed
 
+## [0.2.0] - 2026-08-10
+
+### Added
+- System-state capture: `key=value` snapshots logged as `[STATE:before]` and `[STATE:after]`, plus a `[STATE:diff]` block listing every key the run changed.
+- Captured facts: device-tree model and board serial, `machine-id`, boot id, hostname, power mode, L4T / JetPack / CUDA versions, flashed vendor image name, per-interface MAC and IPv4 and link state, default route and SSID, disk model / serial / size, USB device list, `/dev/osrbot_*` targets, ROS and Python package versions, driver and lidar revisions, per-directory sizes, and service enable and active state.
+- Tests covering the snapshot markers, the captured identifiers, MAC capture, snapshot ordering ahead of removal, and temp-file cleanup.
+- `INSTALLER_VERSION` stamped into the log header, the installation summary, and the state snapshots as `ws.installer_version`.
+
+### Changed
+- `README.md` reduced to what the repository is, prerequisites, installation, expected result, and where to send logs; the full guide moved to `docs/installer-guide.md`.
+- The "before" snapshot is taken ahead of the confirmation prompt, so a declined run still records what the car was.
+- Temp-file and sudo-keepalive teardown moved into a single `cleanup` EXIT trap.
+
+### Fixed
+### Removed
+
 ## [0.1.0] - 2026-08-10
 
 ### Added
@@ -22,6 +38,3 @@ All notable changes to this project. Format: Keep a Changelog
 - Reboot notice explaining why group membership, udev symlinks, and services need a boot to take effect.
 - pytest suite covering the dry-run path, log behavior, diagnostic coverage, and the removal guards.
 - `README.md`, `docs/architecture.md`, and this changelog.
-
-### Known gaps
-- No account linking. Binding a car to its owner's neobotics.org account is not part of this release; register cars by hand until the API is specified.
