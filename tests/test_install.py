@@ -8,6 +8,7 @@ that can only fire on a real run are covered by reading the script source.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -145,6 +146,51 @@ def test_log_records_diagnostic_verdicts(sandbox: tuple[Path, Path]) -> None:
     assert "INSTALLATION SUMMARY" in log_text
 
 
+def test_log_holds_before_and_after_state(sandbox: tuple[Path, Path]) -> None:
+    home, script = sandbox
+    run_installer(home, script, "--dry-run", "--yes")
+    log_text = next((script.parent.parent / "logs").glob("install_*.log")).read_text()
+    for marker in ("STATE:before ==========", "STATE:after ==========", "STATE:diff =========="):
+        assert marker in log_text
+
+
+def test_state_captures_device_identifiers(sandbox: tuple[Path, Path]) -> None:
+    home, script = sandbox
+    run_installer(home, script, "--dry-run", "--yes")
+    log_text = next((script.parent.parent / "logs").glob("install_*.log")).read_text()
+    for key in (
+        "device.model=",
+        "device.serial=",
+        "device.machine_id=",
+        "device.hostname=",
+        "os.kernel=",
+        "os.l4t=",
+        "usb.count=",
+        "udev.racecar_rules=",
+    ):
+        assert f"[STATE:before] {key}" in log_text, f"{key} not captured"
+
+
+def test_state_captures_a_mac_address(sandbox: tuple[Path, Path]) -> None:
+    home, script = sandbox
+    run_installer(home, script, "--dry-run", "--yes")
+    log_text = next((script.parent.parent / "logs").glob("install_*.log")).read_text()
+    macs = re.findall(r"\[STATE:before\] net\.\S+\.mac=([0-9a-f:]{17})$", log_text, re.MULTILINE)
+    assert macs, "no interface MAC captured"
+
+
+def test_state_snapshot_is_taken_before_removal(script_source: str) -> None:
+    snapshot = script_source.index('snapshot_state "before"')
+    removal = script_source.index("[1/3] Removing existing systems and code")
+    assert snapshot < removal
+
+
+def test_state_temp_files_are_cleaned_up(sandbox: tuple[Path, Path]) -> None:
+    home, script = sandbox
+    run_installer(home, script, "--dry-run", "--yes")
+    assert not list((script.parent.parent / "logs").glob(".state_*"))
+
+
 def test_removal_refuses_a_target_outside_home(sandbox: tuple[Path, Path], tmp_path: Path) -> None:
     home, script = sandbox
     outside = tmp_path / "elsewhere"
@@ -171,6 +217,18 @@ def test_diagnostics_cover_every_driver_phase(sandbox: tuple[Path, Path]) -> Non
         "systemd services",
     ):
         assert phase in out, f"no diagnostic section for {phase}"
+
+
+def test_version_is_stamped_and_documented(script_source: str) -> None:
+    match = re.search(r'^INSTALLER_VERSION="(\d+\.\d+\.\d+)"$', script_source, re.MULTILINE)
+    assert match, "install.sh carries no INSTALLER_VERSION"
+    version = match.group(1)
+
+    result = subprocess.run(["bash", str(INSTALL_SH), "--help"], capture_output=True, text=True)
+    assert version in result.stdout
+
+    changelog = (REPO_ROOT / "docs" / "changelog.md").read_text()
+    assert f"## [{version}]" in changelog, f"changelog has no {version} entry"
 
 
 def test_root_is_refused(script_source: str) -> None:

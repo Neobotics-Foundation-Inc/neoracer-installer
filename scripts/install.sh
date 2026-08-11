@@ -9,6 +9,7 @@
 # Usage: bash neoracer-installer/scripts/install.sh [-y] [--dry-run]
 
 # static variables
+INSTALLER_VERSION="0.2.0"
 DRIVER_URL="https://github.com/Neobotics-Foundation-Inc/neoracer_ros2_driver.git"
 DRIVER_NAME="neoracer_ros2_driver"
 LIDAR_NAME="lakibeam1"
@@ -49,8 +50,8 @@ ASSUME_YES=false
 DRY_RUN=false
 
 usage() {
+    echo "Neoracer system software installer, version ${INSTALLER_VERSION}."
     cat <<'USAGEEOF'
-Neoracer system software installer.
 
 Usage: bash neoracer-installer/scripts/install.sh [options]
 
@@ -89,6 +90,16 @@ done
 LOG_DIR="${INSTALLER_DIR}/logs"
 mkdir -p "$LOG_DIR"
 LOG_FILE="${LOG_DIR}/install_$(date '+%Y-%m-%d_%H-%M-%S').log"
+
+# Snapshots taken before and after the run; compared into a [STATE:diff] block.
+BEFORE_STATE="${LOG_DIR}/.state_before_$$.tmp"
+AFTER_STATE="${LOG_DIR}/.state_after_$$.tmp"
+
+cleanup() {
+    [ -n "${SUDO_KEEPALIVE_PID:-}" ] && kill "$SUDO_KEEPALIVE_PID" 2>/dev/null
+    rm -f "$BEFORE_STATE" "$AFTER_STATE"
+}
+trap cleanup EXIT
 
 # Log a message to both the console and the log file
 log() {
@@ -132,6 +143,197 @@ run_pipe() {
     return $exit_code
 }
 
+# ============================================================================
+# System state capture
+#
+# One key=value line per fact, written to a snapshot file and mirrored into the
+# log under a [STATE:<phase>] prefix. Snapshots are taken before the erase and
+# after the driver setup, then compared, so a support request carries what the
+# car was, what it became, and what the run changed.
+#
+# Identifiers here are device identifiers (board serial, MAC addresses, disk
+# serials) and stay in the local log. Nothing reads credentials, key material,
+# or Wi-Fi secrets.
+# ============================================================================
+
+# Print one key=value line; missing facts are recorded as "unknown" rather than
+# dropped, so a key that disappears in the diff means the fact itself changed.
+emit() {
+    printf '%s=%s\n' "$1" "${2:-unknown}"
+}
+
+# Device-tree strings are NUL-terminated.
+dt_read() {
+    [ -r "$1" ] && tr -d '\0' < "$1"
+}
+
+capture_state() {
+    local ws_dir="$WS_DIR"
+
+    # --- identity ---------------------------------------------------------
+    emit "device.model" "$(dt_read /proc/device-tree/model)"
+    emit "device.serial" "$(dt_read /proc/device-tree/serial-number)"
+    # compatible is a NUL-separated list; the first entry names the board.
+    emit "device.compatible" "$(tr '\0' '\n' < /proc/device-tree/compatible 2>/dev/null | head -1)"
+    emit "device.machine_id" "$(cat /etc/machine-id 2>/dev/null)"
+    emit "device.boot_id" "$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)"
+    emit "device.hostname" "$(hostname 2>/dev/null)"
+    emit "device.cpu_serial" "$(awk -F': ' '/^Serial/ {print $2; exit}' /proc/cpuinfo 2>/dev/null)"
+    emit "device.power_mode" "$(nvpmodel -q 2>/dev/null | awk -F': ' '/NV Power Mode/ {print $2; exit}')"
+
+    # --- platform ---------------------------------------------------------
+    emit "os.release" "$(lsb_release -ds 2>/dev/null | tr -d '"')"
+    emit "os.kernel" "$(uname -r)"
+    emit "os.arch" "$(uname -m)"
+    emit "os.l4t" "$(sed -n 's/^# R\([0-9]*\).*REVISION: \([0-9.]*\).*/R\1.\2/p' /etc/nv_tegra_release 2>/dev/null | head -1)"
+    # Vendor image line, when the flashing tool left one; names which board
+    # image a car was provisioned from.
+    emit "os.image" "$(sed -n 's/^# .*Image Name \(.*\)$/\1/p' /etc/nv_tegra_release 2>/dev/null | head -1)"
+    emit "os.jetpack" "$(dpkg-query -W -f='${Version}' nvidia-jetpack 2>/dev/null)"
+    emit "os.cuda" "$(basename "$(readlink -f /usr/local/cuda 2>/dev/null)" 2>/dev/null)"
+    emit "os.python3" "$(python3 --version 2>&1 | awk '{print $2}')"
+    emit "host.uptime_s" "$(awk '{print int($1)}' /proc/uptime 2>/dev/null)"
+
+    # --- capacity ---------------------------------------------------------
+    emit "mem.total_kb" "$(awk '/^MemTotal/ {print $2}' /proc/meminfo 2>/dev/null)"
+    emit "disk.root_avail_kb" "$(df -Pk / 2>/dev/null | awk 'NR==2 {print $4}')"
+    emit "disk.home_avail_kb" "$(df -Pk "$HOME" 2>/dev/null | awk 'NR==2 {print $4}')"
+
+    # --- network ----------------------------------------------------------
+    # MAC per interface: the stable per-device identifier when the board serial
+    # is unreadable, and the way to tell two cars apart in a shared log dump.
+    local iface
+    for iface in /sys/class/net/*; do
+        [ -e "$iface" ] || continue
+        local name
+        name=$(basename "$iface")
+        [ "$name" = "lo" ] && continue
+        emit "net.${name}.mac" "$(cat "${iface}/address" 2>/dev/null)"
+        emit "net.${name}.state" "$(cat "${iface}/operstate" 2>/dev/null)"
+        emit "net.${name}.ipv4" "$(ip -4 -o addr show dev "$name" 2>/dev/null | awk '{print $4}' | paste -sd, -)"
+    done
+    emit "net.default_route" "$(ip route show default 2>/dev/null | awk 'NR==1 {print $3 " via " $5}')"
+    emit "net.wifi_ssid" "$(iwgetid -r 2>/dev/null)"
+
+    # --- storage and peripherals -----------------------------------------
+    # -P quotes every value: disk models contain spaces and empty serials would
+    # otherwise shift the columns.
+    local line dname
+    while IFS= read -r line; do
+        dname=$(sed -n 's/.*NAME="\([^"]*\)".*/\1/p' <<< "$line")
+        case "$dname" in ""|loop*|zram*|ram*) continue ;; esac
+        emit "storage.${dname}.size" "$(sed -n 's/.*SIZE="\([^"]*\)".*/\1/p' <<< "$line")"
+        emit "storage.${dname}.model" "$(sed -n 's/.*MODEL="\([^"]*\)".*/\1/p' <<< "$line")"
+        emit "storage.${dname}.serial" "$(sed -n 's/.*SERIAL="\([^"]*\)".*/\1/p' <<< "$line")"
+    done < <(lsblk -dn -P -o NAME,SIZE,MODEL,SERIAL 2>/dev/null)
+
+    emit "usb.count" "$(lsusb 2>/dev/null | wc -l)"
+    local n=0 line
+    while read -r line; do
+        n=$((n + 1))
+        emit "usb.device.${n}" "$(echo "$line" | sed 's/^Bus [0-9]* Device [0-9]*: //')"
+    done < <(lsusb 2>/dev/null | sort)
+
+    local dev
+    for dev in /dev/osrbot_base /dev/osrbot_led_matrix /dev/osrbot_usb_cam; do
+        if [ -e "$dev" ]; then
+            emit "peripheral.$(basename "$dev")" "$(readlink -f "$dev" 2>/dev/null || echo present)"
+        else
+            emit "peripheral.$(basename "$dev")" "absent"
+        fi
+    done
+    emit "peripheral.video_nodes" "$(ls -d /dev/video* 2>/dev/null | paste -sd, -)"
+
+    # --- software inventory ----------------------------------------------
+    emit "pkg.ros_base" "$(dpkg-query -W -f='${Version}' ros-humble-ros-base 2>/dev/null)"
+    emit "pkg.colcon" "$(dpkg-query -W -f='${Version}' python3-colcon-common-extensions 2>/dev/null)"
+    python3 - <<'PYEOF' 2>/dev/null
+from importlib.metadata import PackageNotFoundError, version
+
+for dist in ("torch", "torchvision", "numpy", "ultralytics", "onnx",
+             "tensorrt", "jupyterlab", "opencv-python", "pytest"):
+    try:
+        found = version(dist)
+    except (PackageNotFoundError, Exception):
+        found = "absent"
+    print(f"pkg.{dist.replace('-', '_')}={found}")
+PYEOF
+
+    # --- workspace and services -------------------------------------------
+    emit "ws.installer_version" "$INSTALLER_VERSION"
+    emit "ws.installer_rev" "$(git -C "$INSTALLER_DIR" rev-parse --short HEAD 2>/dev/null)"
+    if [ -d "${SRC_DIR}/${DRIVER_NAME}/.git" ]; then
+        emit "ws.driver_rev" "$(git -C "${SRC_DIR}/${DRIVER_NAME}" rev-parse --short HEAD 2>/dev/null)"
+        emit "ws.driver_dirty" "$([ -n "$(git -C "${SRC_DIR}/${DRIVER_NAME}" status --porcelain 2>/dev/null)" ] && echo yes || echo no)"
+    else
+        emit "ws.driver_rev" "absent"
+        emit "ws.driver_dirty" "absent"
+    fi
+    if [ -d "${SRC_DIR}/${LIDAR_NAME}/.git" ]; then
+        emit "ws.lidar_rev" "$(git -C "${SRC_DIR}/${LIDAR_NAME}" describe --tags --always 2>/dev/null)"
+    else
+        emit "ws.lidar_rev" "absent"
+    fi
+    emit "ws.installed_packages" "$(ls -1 "${ws_dir}/install" 2>/dev/null | grep -cv '^\(setup\.\|local_setup\|_local_setup\|COLCON_IGNORE\)' )"
+
+    local path
+    for path in "$JUPYTER_WS" "$WS_DIR" "$DATA_DIR" "$CAR_LOG_DIR"; do
+        emit "dir.$(basename "$path").size_kb" "$(du -sk "$path" 2>/dev/null | cut -f1)"
+    done
+
+    local svc
+    for svc in "${CORE_SERVICES[@]}"; do
+        emit "svc.${svc%.service}.enabled" "$(systemctl is-enabled "$svc" 2>/dev/null || echo absent)"
+        emit "svc.${svc%.service}.active" "$(systemctl is-active "$svc" 2>/dev/null || echo inactive)"
+    done
+    emit "udev.racecar_rules" "$([ -f /etc/udev/rules.d/99-racecar.rules ] && echo present || echo absent)"
+}
+
+# Take a snapshot, mirror it into the log, and keep the file for the diff.
+snapshot_state() {
+    local phase="$1" dest="$2"
+    capture_state > "$dest" 2>/dev/null
+    log_silent "========== STATE:${phase} =========="
+    while read -r line; do
+        log_silent "[STATE:${phase}] ${line}"
+    done < "$dest"
+    log_silent "========== STATE:${phase} END =========="
+}
+
+# Report what the run changed. host.uptime_s always moves and says nothing, so
+# it is dropped; every other key is worth seeing, including the disk and
+# directory sizes the install consumed.
+diff_state() {
+    [ -s "$BEFORE_STATE" ] && [ -s "$AFTER_STATE" ] || return 0
+
+    local changes
+    changes=$(awk -F= '
+        NR == FNR { before[$1] = substr($0, index($0, "=") + 1); next }
+        {
+            key = $1
+            val = substr($0, index($0, "=") + 1)
+            if (!(key in before))        print "added   " key " = " val
+            else if (before[key] != val) print "changed " key ": " before[key] " -> " val
+            delete before[key]
+        }
+        END { for (k in before) print "removed " k " = " before[k] }
+    ' "$BEFORE_STATE" "$AFTER_STATE" | grep -v ' host.uptime_s' | sort)
+
+    log_silent "========== STATE:diff =========="
+    if [ -z "$changes" ]; then
+        log_silent "[STATE:diff] no differences"
+    else
+        while read -r line; do
+            log_silent "[STATE:diff] ${line}"
+        done <<< "$changes"
+    fi
+    log_silent "========== STATE:diff END =========="
+
+    local count
+    count=$(printf '%s\n' "$changes" | grep -c . )
+    log "  ${count} system state key(s) changed; see [STATE:diff] in $LOG_FILE"
+}
+
 # Capture start time for duration calculation
 INSTALL_START_TIME=$(date +%s)
 
@@ -145,6 +347,7 @@ log_silent "Kernel: $(uname -a)"
 log_silent "OS: $(lsb_release -ds 2>/dev/null || echo unknown)"
 log_silent "L4T: $(cat /etc/nv_tegra_release 2>/dev/null || echo 'not a Tegra board')"
 log_silent "INSTALLER_DIR: $INSTALLER_DIR"
+log_silent "Installer version: ${INSTALLER_VERSION}"
 log_silent "Installer revision: $(git -C "$INSTALLER_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 log_silent "Flags: assume_yes=${ASSUME_YES} dry_run=${DRY_RUN}"
 log_silent "======================================="
@@ -189,6 +392,17 @@ if [ -n "$MISSING_TOOLS" ]; then
 fi
 log "  [OK] required tools present (git, curl, bash, sudo)"
 
+# Snapshot before anything is touched, and before the confirmation prompt, so
+# even a declined run leaves a record of what this car was.
+snapshot_state "before" "$BEFORE_STATE"
+STATE_MODEL=$(awk -F= '/^device\.model=/ {print substr($0, index($0, "=") + 1)}' "$BEFORE_STATE")
+STATE_SERIAL=$(awk -F= '/^device\.serial=/ {print substr($0, index($0, "=") + 1)}' "$BEFORE_STATE")
+STATE_HOST=$(awk -F= '/^device\.hostname=/ {print substr($0, index($0, "=") + 1)}' "$BEFORE_STATE")
+log "  [OK] system state recorded"
+log "       device:   ${STATE_MODEL:-unknown}"
+log "       serial:   ${STATE_SERIAL:-unknown}"
+log "       hostname: ${STATE_HOST:-unknown}"
+
 if [ "$DRY_RUN" = false ]; then
     if ! GIT_TERMINAL_PROMPT=0 git ls-remote --exit-code -h "$DRIVER_URL" >/dev/null 2>&1; then
         echo -e "\e[1;31m[ERROR] Cannot reach the driver repository:\e[0m"
@@ -214,10 +428,9 @@ if [ "$DRY_RUN" = false ]; then
         log_silent "========== INSTALL LOG END (ABORTED: sudo failed) =========="
         exit 1
     fi
-    # Keep sudo alive for the whole run.
+    # Keep sudo alive for the whole run; cleanup() kills it on exit.
     ( while true; do sudo -n true; sleep 60; kill -0 "$$" || exit; done ) 2>/dev/null &
     SUDO_KEEPALIVE_PID=$!
-    trap 'kill $SUDO_KEEPALIVE_PID 2>/dev/null' EXIT
     log "  [OK] sudo authenticated"
 fi
 
@@ -404,11 +617,18 @@ else
 fi
 
 # ============================================================================
-# Post-install diagnostics
+# Post-install state and diagnostics
 #
-# One check per component the driver setup installs, so a failed run names the
-# phase to re-run instead of just reporting that something went wrong.
+# The second snapshot runs before the checks so the diff describes the car the
+# diagnostics are about to inspect. One check per component the driver setup
+# installs, so a failed run names the phase to re-run instead of just reporting
+# that something went wrong.
 # ============================================================================
+log ""
+log "Recording system state after the run..."
+snapshot_state "after" "$AFTER_STATE"
+diff_state
+
 log ""
 log "Running post-install diagnostics..."
 log "=========================================================================="
@@ -705,6 +925,7 @@ INSTALL_SECONDS=$((INSTALL_DURATION % 60))
 
 log ""
 echo -e "\e[1;36m======================== INSTALLATION SUMMARY ========================\e[0m"
+echo -e "  Installer:        \e[1mv${INSTALLER_VERSION}\e[0m"
 echo -e "  Driver:           \e[1m${DRIVER_NAME} ${DRIVER_REV:-not cloned}\e[0m"
 echo -e "  Workspace:        \e[1m${WS_DIR}\e[0m"
 echo -e "  Checks:           \e[1m${PASS}/${TOTAL} passed, ${WARN} warning(s)\e[0m"
@@ -713,6 +934,7 @@ echo -e "  Duration:         \e[1m${INSTALL_MINUTES}m ${INSTALL_SECONDS}s\e[0m"
 echo -e "\e[1;36m======================================================================\e[0m"
 
 log_silent "======================== INSTALLATION SUMMARY ========================"
+log_silent "  Installer:        v${INSTALLER_VERSION}"
 log_silent "  Driver:           ${DRIVER_NAME} ${DRIVER_REV:-not cloned}"
 log_silent "  Workspace:        ${WS_DIR}"
 log_silent "  Checks:           ${PASS}/${TOTAL} passed, ${WARN} warning(s)"
