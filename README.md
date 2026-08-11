@@ -43,16 +43,29 @@ To see what the installer would do without changing anything, run
 The run prints three steps, then checks every component it installed:
 
 ```
+Driver version
+  installed:  9c6902a (v0.4.2, 2026-08-07) Merge pull request #15 from ...
+  incoming:   1f4ab90 (remote HEAD)
+  status:     update available (9c6902a -> 1f4ab90)
+
 [1/3] Removing existing systems and code...
 [2/3] Creating workspace folders...
 [3/3] Cloning the driver and running its setup...
+
+Driver version
+  previous:   9c6902a (v0.4.2, 2026-08-07) Merge pull request #15 from ...
+  installed:  1f4ab90 (v0.5.0, 2026-08-10) Add lidar scan-health watchdog
+  result:     updated 9c6902a -> 1f4ab90
 
 Running post-install diagnostics...
   [PASS] ROS2 Humble installed (/opt/ros/humble)
   [PASS] workspace built (/home/racecar/ros2_ws/install/setup.bash)
   ...
-  All 35 checks passed.
+  All 36 checks passed.
 ```
+
+The version the car is on before the run, and the one it will be moved to, are
+both shown before you confirm the erase, and again once the driver is in place.
 
 After the reboot you have a built `~/ros2_ws`, the `racecar` command in every new
 terminal, JupyterLab on port 8888, the status dashboard on port 8080, and the

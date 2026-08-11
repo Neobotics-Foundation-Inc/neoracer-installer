@@ -10,6 +10,19 @@ All notable changes to this project. Format: Keep a Changelog
 ### Fixed
 ### Removed
 
+## [0.2.1] - 2026-08-10
+
+### Added
+- Driver version reporting: the installed revision and the incoming remote HEAD are shown before the confirmation prompt, and the previous / installed / result transition is shown once the driver is in place.
+- Revision lines carry the short SHA, exact tag, commit date, and commit subject; `ws.driver_version`, `ws.driver_branch`, and `ws.driver_commit_date` join the state snapshots.
+- Diagnostic confirming the clone landed on the revision advertised at preflight, warning when the branch moved mid-run.
+
+### Changed
+- Preflight resolves the driver's remote HEAD with `git ls-remote`, which also serves as the reachability probe; revisions are compared as full SHAs rather than short forms.
+
+### Fixed
+### Removed
+
 ## [0.2.0] - 2026-08-10
 
 ### Added
