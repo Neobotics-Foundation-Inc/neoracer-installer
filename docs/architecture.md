@@ -12,7 +12,7 @@ directory is the only thing a run leaves behind in this repository.
 
 | Module (path)            | Responsibility                                                        | Depends on                          |
 | ------------------------ | --------------------------------------------------------------------- | ----------------------------------- |
-| `scripts/install.sh`     | Preflight, confirmation, four run steps, diagnostics, summary          | git, curl, sudo, systemctl          |
+| `scripts/install.sh`     | Preflight, confirmation, three run steps, diagnostics, summary         | git, curl, sudo, systemctl          |
 | `logs/`                  | One timestamped log per run, never rotated                            | written by `install.sh`             |
 | `tests/test_install.py`  | Dry-run behavior and guard coverage                                   | pytest, bash                        |
 | `neoracer_ros2_driver`   | The actual install, in eight phases behind `scripts/setup_all.sh`     | cloned into `~/ros2_ws/src` at run  |
@@ -26,21 +26,18 @@ preflight (root, tools, repo reachable, sudo)
 confirmation  ---- declined ----> exit 1, nothing removed
    |
    v
-[1/4] remove  ~/jupyter_ws  ~/ros2_ws  ~/data  ~/logs
+[1/3] remove  ~/jupyter_ws  ~/ros2_ws  ~/data  ~/logs
    |
    v
-[2/4] create  ~/ros2_ws/src  ~/data  ~/logs
+[2/3] create  ~/ros2_ws/src  ~/data  ~/logs
    |
    v
-[3/4] clone neoracer_ros2_driver -> bash scripts/setup_all.sh
+[3/3] clone neoracer_ros2_driver -> bash scripts/setup_all.sh
           |
           +-> [1/8] ROS2 Humble      [5/8] workspace build
               [2/8] dev tools        [6/8] GPU stack
               [3/8] user environment [7/8] JupyterLab + student library
               [4/8] udev rules       [8/8] systemd services
-   |
-   v
-[4/4] account link (reachability probe; registration API pending)
    |
    v
 diagnostics -> summary -> reboot notice -> exit 0 or 1
@@ -50,9 +47,8 @@ diagnostics -> summary -> reboot notice -> exit 0 or 1
 
 - **Filesystem.** Erases and recreates `~/jupyter_ws`, `~/ros2_ws`, `~/data`,
   `~/logs`. Writes `logs/install_<timestamp>.log` inside this repository.
-- **Network.** `git ls-remote` and `git clone` against the driver repository;
-  an HTTP GET against <https://neobotics.org/> in step 4. Everything else is
-  fetched by the driver's setup scripts.
+- **Network.** `git ls-remote` and `git clone` against the driver repository.
+  Everything else is fetched by the driver's setup scripts.
 - **systemd.** Stops the four core units before removal; reads their enable
   state during diagnostics. Never starts them, so nothing launches mid-install.
 - **sudo.** Authenticated once in preflight and refreshed by a background
@@ -71,14 +67,7 @@ diagnostics -> summary -> reboot notice -> exit 0 or 1
   repairing state by hand.
 - **Diagnostic granularity.** One check per installed component, grouped by the
   driver phase that installs it, so a failure points at a specific script to
-  re-run. Conditions outside the installer's control (unplugged hardware, the
-  unspecified account API) are warnings, not failures.
+  re-run. Conditions outside the installer's control, such as unplugged
+  hardware, are warnings rather than failures.
 - **Failure visibility.** The run continues to diagnostics even when the driver
   setup exits non-zero, so the operator sees exactly which components landed.
-
-## Pending work
-
-Step 4 has no registration call. It probes reachability and reports the link as
-pending. When the neobotics.org endpoint, payload, and credential handling are
-specified, replace the probe in the `[4/4]` block of `scripts/install.sh` and
-turn `ACCOUNT_LINK_STATE` into a pass/fail diagnostic.

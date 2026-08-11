@@ -93,10 +93,6 @@ aborted. A `--dry-run` always exits 0.
    `neoracer_ros2_driver/scripts/setup_all.sh`, whose eight phases are ROS2
    Humble, dev tools, user environment, udev rules, workspace build, GPU stack,
    JupyterLab, and systemd services. This is the long step.
-4. **Account link.** Not implemented yet. The step currently checks that
-   <https://neobotics.org/> is reachable and reports the link as pending, so a
-   car with no route to the site is flagged during install rather than the first
-   time someone opens the dashboard. Register the car manually at that address.
 
 Preflight checks run before step 1: sudo rights, the presence of `git` and
 `curl`, and a reachability probe of the driver repository. A car that cannot
@@ -104,8 +100,9 @@ reach GitHub is stopped with its old software still intact.
 
 ## Diagnostics
 
-After step 4 the installer verifies each component, grouped by the step and
-driver phase that installs it, so a failure names the script to re-run:
+Once the driver setup returns, the installer verifies each component, grouped by
+the step and driver phase that installs it, so a failure names the script to
+re-run:
 
 - Workspace layout: the four directories exist.
 - Driver checkout: the clone is present and carries `setup_all.sh`.
@@ -123,9 +120,9 @@ driver phase that installs it, so a failure names the script to re-run:
 - Run log: no command in the run exited non-zero.
 
 Results print as `[PASS]`, `[FAIL]`, or `[WARN]`. Warnings cover conditions the
-installer does not control: a `/dev/osrbot_*` symlink is missing whenever the
-device is unplugged or has not been re-plugged since the rules were installed,
-and account linking is pending by design. Warnings do not fail the run.
+installer does not control; a `/dev/osrbot_*` symlink is missing whenever the
+device is unplugged or has not been re-plugged since the rules were installed.
+Warnings do not fail the run.
 
 ## Logs
 
@@ -194,6 +191,6 @@ See [docs/architecture.md](docs/architecture.md).
 Latest entries; full history in [docs/changelog.md](docs/changelog.md).
 
 ### [0.1.0] - 2026-08-10
-- Added: `scripts/install.sh`, the four-step erase-and-reinstall run with preflight checks, per-run logging, and post-install diagnostics.
+- Added: `scripts/install.sh`, the erase-and-reinstall run with preflight checks, per-run logging, and post-install diagnostics.
 - Added: pytest suite covering the dry-run path and the removal guards.
 - Added: repository documentation and log directory.

@@ -13,7 +13,7 @@ All notable changes to this project. Format: Keep a Changelog
 ## [0.1.0] - 2026-08-10
 
 ### Added
-- `scripts/install.sh`: four-step erase-and-reinstall run (remove the four car directories, recreate them, clone `neoracer_ros2_driver` and run its `setup_all.sh`, probe the neobotics.org account link).
+- `scripts/install.sh`: three-step erase-and-reinstall run (remove the four car directories, recreate them, clone `neoracer_ros2_driver` and run its `setup_all.sh`).
 - Preflight checks ahead of any removal: root refusal, required tools, driver-repository reachability, sudo authentication with a keepalive for the run.
 - Confirmation prompt listing each directory and its size, with `-y` for non-interactive runs and `--dry-run` for a rehearsal.
 - Removal guard: one explicit path per call, symlinks resolved, `/` and `$HOME` and anything outside `$HOME` refused; core services stopped before removal.
@@ -24,4 +24,4 @@ All notable changes to this project. Format: Keep a Changelog
 - `README.md`, `docs/architecture.md`, and this changelog.
 
 ### Known gaps
-- Step 4 does not link the car to a neobotics.org account; the API is unspecified, so the step only probes reachability and reports the link as pending.
+- No account linking. Binding a car to its owner's neobotics.org account is not part of this release; register cars by hand until the API is specified.

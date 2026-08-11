@@ -67,8 +67,9 @@ def test_script_parses() -> None:
 def test_help_lists_every_step() -> None:
     result = subprocess.run(["bash", str(INSTALL_SH), "--help"], capture_output=True, text=True)
     assert result.returncode == 0
-    for step in ("[1/4]", "[2/4]", "[3/4]", "[4/4]"):
+    for step in ("[1/3]", "[2/3]", "[3/3]"):
         assert step in result.stdout
+    assert "[4/" not in result.stdout
 
 
 def test_unknown_option_is_rejected() -> None:
@@ -92,15 +93,21 @@ def test_dry_run_keeps_every_file(sandbox: tuple[Path, Path]) -> None:
     assert (home / "data" / "run.bag").read_text() == "payload"
 
 
-def test_dry_run_reports_all_four_steps(sandbox: tuple[Path, Path]) -> None:
+def test_dry_run_reports_every_step(sandbox: tuple[Path, Path]) -> None:
     home, script = sandbox
     out = run_installer(home, script, "--dry-run", "--yes").stdout
-    assert "[1/4] Removing existing systems and code" in out
-    assert "[2/4] Creating workspace folders" in out
-    assert "[3/4] Cloning the driver and running its setup" in out
-    assert "[4/4] Linking the car to a neobotics.org account" in out
+    assert "[1/3] Removing existing systems and code" in out
+    assert "[2/3] Creating workspace folders" in out
+    assert "[3/3] Cloning the driver and running its setup" in out
     assert "Running post-install diagnostics" in out
     assert "sudo reboot" in out
+
+
+def test_no_account_link_step(sandbox: tuple[Path, Path]) -> None:
+    home, script = sandbox
+    out = run_installer(home, script, "--dry-run", "--yes").stdout
+    assert "neobotics.org" not in out
+    assert "account link" not in out.lower()
 
 
 def test_dry_run_plans_the_documented_commands(sandbox: tuple[Path, Path]) -> None:
@@ -162,7 +169,6 @@ def test_diagnostics_cover_every_driver_phase(sandbox: tuple[Path, Path]) -> Non
         "GPU stack",
         "JupyterLab and student library",
         "systemd services",
-        "account link",
     ):
         assert phase in out, f"no diagnostic section for {phase}"
 
@@ -183,5 +189,5 @@ def test_confirmation_required_without_a_terminal(script_source: str) -> None:
 
 def test_repo_is_reachable_before_anything_is_erased(script_source: str) -> None:
     preflight = script_source.index("git ls-remote")
-    removal = script_source.index("[1/4] Removing existing systems and code")
+    removal = script_source.index("[1/3] Removing existing systems and code")
     assert preflight < removal

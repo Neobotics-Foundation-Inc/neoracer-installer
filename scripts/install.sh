@@ -12,7 +12,6 @@
 DRIVER_URL="https://github.com/Neobotics-Foundation-Inc/neoracer_ros2_driver.git"
 DRIVER_NAME="neoracer_ros2_driver"
 LIDAR_NAME="lakibeam1"
-ACCOUNT_URL="https://neobotics.org/"
 
 WS_DIR="$HOME/ros2_ws"
 SRC_DIR="$WS_DIR/src"
@@ -61,10 +60,9 @@ Options:
   -h, --help      Show this message.
 
 Steps:
-  [1/4] Remove ~/jupyter_ws, ~/ros2_ws, ~/data, ~/logs
-  [2/4] Create ~/ros2_ws/src, ~/data, ~/logs
-  [3/4] Clone the driver and run scripts/setup_all.sh
-  [4/4] Link the car to a neobotics.org account (pending implementation)
+  [1/3] Remove ~/jupyter_ws, ~/ros2_ws, ~/data, ~/logs
+  [2/3] Create ~/ros2_ws/src, ~/data, ~/logs
+  [3/3] Clone the driver and run scripts/setup_all.sh
 
 Every run is logged to neoracer-installer/logs/.
 USAGEEOF
@@ -270,11 +268,11 @@ else
 fi
 
 # ============================================================================
-# [1/4] Removal of existing systems and code
+# [1/3] Removal of existing systems and code
 # ============================================================================
 log ""
 echo -e "\e[1;36m==========================================================================\e[0m"
-log "[1/4] Removing existing systems and code..."
+log "[1/3] Removing existing systems and code..."
 echo -e "\e[1;36m==========================================================================\e[0m"
 
 # Remove one explicit path, refusing anything outside $HOME or $HOME itself.
@@ -335,11 +333,11 @@ for path in "${WIPE_PATHS[@]}"; do
 done
 
 # ============================================================================
-# [2/4] Folder creation
+# [2/3] Folder creation
 # ============================================================================
 log ""
 echo -e "\e[1;36m==========================================================================\e[0m"
-log "[2/4] Creating workspace folders..."
+log "[2/3] Creating workspace folders..."
 echo -e "\e[1;36m==========================================================================\e[0m"
 
 for path in "${CREATE_PATHS[@]}"; do
@@ -356,11 +354,11 @@ for path in "${CREATE_PATHS[@]}"; do
 done
 
 # ============================================================================
-# [3/4] Driver clone and setup
+# [3/3] Driver clone and setup
 # ============================================================================
 log ""
 echo -e "\e[1;36m==========================================================================\e[0m"
-log "[3/4] Cloning the driver and running its setup..."
+log "[3/3] Cloning the driver and running its setup..."
 echo -e "\e[1;36m==========================================================================\e[0m"
 log "This phase installs ROS2 Humble, builds the workspace, and installs the"
 log "GPU stack. It takes 30 to 60 minutes on a fresh car; keep the car powered"
@@ -406,33 +404,6 @@ else
 fi
 
 # ============================================================================
-# [4/4] Account link
-#
-# TBD: bind this car to its owner's neobotics.org account. The endpoint,
-# payload, and credential handling are not specified yet, so the step only
-# confirms the site is reachable; a car that cannot reach it is flagged at
-# install time rather than the first time someone opens the web dashboard.
-#
-# When the API lands, replace the reachability probe with the registration
-# call and turn ACCOUNT_LINK_STATE into pass/fail.
-# ============================================================================
-log ""
-echo -e "\e[1;36m==========================================================================\e[0m"
-log "[4/4] Linking the car to a neobotics.org account..."
-echo -e "\e[1;36m==========================================================================\e[0m"
-
-ACCOUNT_LINK_STATE="pending"
-if [ "$DRY_RUN" = true ]; then
-    log "  [dry-run] ping ${ACCOUNT_URL}"
-elif curl -sf --max-time 15 -o /dev/null "$ACCOUNT_URL" 2>>"$LOG_FILE"; then
-    log "  [ OK ] ${ACCOUNT_URL} is reachable"
-else
-    ACCOUNT_LINK_STATE="unreachable"
-    log "  [WARN] ${ACCOUNT_URL} is not reachable from this car"
-fi
-log "  Account linking is not implemented yet; register the car at ${ACCOUNT_URL}"
-
-# ============================================================================
 # Post-install diagnostics
 #
 # One check per component the driver setup installs, so a failed run names the
@@ -458,8 +429,8 @@ check_fail() {
     FAIL=$((FAIL + 1))
 }
 
-# Conditions the installer cannot control: unplugged hardware, an unspecified
-# account API. Reported, but they do not fail the run.
+# Conditions the installer cannot control, such as unplugged hardware.
+# Reported, but they do not fail the run.
 check_warn() {
     echo -e "  \e[33m[WARN]\e[0m $1"
     log_silent "[WARN] $1"
@@ -697,13 +668,6 @@ if command -v systemctl >/dev/null 2>&1; then
 else
     check_warn "systemctl unavailable; cannot verify services"
 fi
-
-section "Step 4: account link"
-
-case "$ACCOUNT_LINK_STATE" in
-    pending)     check_warn "account linking not implemented yet (register at ${ACCOUNT_URL})" ;;
-    unreachable) check_warn "${ACCOUNT_URL} unreachable; the car cannot be registered until it has internet" ;;
-esac
 
 section "Run log"
 
