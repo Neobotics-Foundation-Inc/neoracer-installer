@@ -263,6 +263,7 @@ Latest entries; full history in [changelog.md](changelog.md).
 
 ### [0.2.2] - 2026-10-26
 - Changed: README notes the `Unable to fetch some archives` failure during the ROS2 Humble install and its fix (`sudo apt-get update`, then run the installer again).
+- Fixed: every running `neoracer-*` service and the vendor `jupyterlab.service` are stopped before the erase, not only the four core units.
 
 ### [0.2.1] - 2026-08-10
 - Added: driver revision reported before the erase (installed vs incoming remote HEAD) and again after the setup (previous vs installed).

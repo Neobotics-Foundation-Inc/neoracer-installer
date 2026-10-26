@@ -601,15 +601,26 @@ remove_path() {
     return 1
 }
 
-# The core services hold open files under ~/logs and ~/ros2_ws. Stop them
-# first so removal does not race a running node.
-if [ "$DRY_RUN" = false ] && command -v systemctl >/dev/null 2>&1; then
-    for svc in "${CORE_SERVICES[@]}"; do
-        if systemctl is-active --quiet "$svc" 2>/dev/null; then
+# Every running unit that holds files under the folders about to go, stopped
+# first so removal does not race a running node: the four core services, the
+# lab dashboards and autonomy (neoracer-*.service, installed by the driver's
+# setup_services.sh) and the vendor image's jupyterlab.service, which serves
+# ~/jupyter_ws until the driver's phase 8 retires it. Stopped, not disabled:
+# the driver's setup decides what runs at boot.
+running_services() {
+    systemctl list-units --type=service --state=active --plain --no-legend \
+        'neoracer-*.service' 'jupyterlab.service' 2>/dev/null | awk '{print $1}'
+}
+if command -v systemctl >/dev/null 2>&1; then
+    while read -r svc; do
+        [ -n "$svc" ] || continue
+        if [ "$DRY_RUN" = true ]; then
+            log "  [dry-run] would stop ${svc}"
+        else
             log "  stopping ${svc}"
             sudo systemctl stop "$svc" >>"$LOG_FILE" 2>&1
         fi
-    done
+    done < <(running_services)
 fi
 
 for path in "${WIPE_PATHS[@]}"; do

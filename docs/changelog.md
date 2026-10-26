@@ -15,6 +15,9 @@ All notable changes to this project. Format: Keep a Changelog
 ### Changed
 - README: what to do when the ROS2 Humble install stops with `Unable to fetch some archives` (the Jetson's package lists are out of date): run `sudo apt-get update`, then the installer again.
 
+### Fixed
+- Before the erase, every running `neoracer-*.service` (the lab dashboards and autonomy, not only the four core units) and the vendor image's `jupyterlab.service` are stopped. A running one had its files erased underneath it.
+
 ## [0.2.1] - 2026-08-10
 
 ### Added
