@@ -10,6 +10,11 @@ All notable changes to this project. Format: Keep a Changelog
 ### Fixed
 ### Removed
 
+## [0.2.2] - 2026-10-26
+
+### Changed
+- README: what to do when the ROS2 Humble install stops with `Unable to fetch some archives` (the Jetson's package lists are out of date): run `sudo apt-get update`, then the installer again.
+
 ## [0.2.1] - 2026-08-10
 
 ### Added

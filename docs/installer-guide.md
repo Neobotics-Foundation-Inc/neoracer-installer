@@ -261,6 +261,9 @@ See [architecture.md](architecture.md).
 
 Latest entries; full history in [changelog.md](changelog.md).
 
+### [0.2.2] - 2026-10-26
+- Changed: README notes the `Unable to fetch some archives` failure during the ROS2 Humble install and its fix (`sudo apt-get update`, then run the installer again).
+
 ### [0.2.1] - 2026-08-10
 - Added: driver revision reported before the erase (installed vs incoming remote HEAD) and again after the setup (previous vs installed).
 - Added: diagnostic confirming the clone landed on the revision advertised at preflight.

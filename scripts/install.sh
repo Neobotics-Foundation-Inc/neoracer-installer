@@ -9,7 +9,7 @@
 # Usage: bash neoracer-installer/scripts/install.sh [-y] [--dry-run]
 
 # static variables
-INSTALLER_VERSION="0.2.1"
+INSTALLER_VERSION="0.2.2"
 DRIVER_URL="https://github.com/Neobotics-Foundation-Inc/neoracer_ros2_driver.git"
 DRIVER_NAME="neoracer_ros2_driver"
 LIDAR_NAME="lakibeam1"
