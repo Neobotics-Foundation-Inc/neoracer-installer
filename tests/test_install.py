@@ -287,3 +287,5 @@ def test_every_running_service_is_stopped_before_removal(script_source: str) -> 
     stop = script_source.index("'neoracer-*.service' 'jupyterlab.service'")
     wipe = script_source.index('for path in "${WIPE_PATHS[@]}"', removal)
     assert removal < stop < wipe
+    # A unit waiting to restart after a crash is "activating"; it must be stopped too.
+    assert "--state=active,activating" in script_source

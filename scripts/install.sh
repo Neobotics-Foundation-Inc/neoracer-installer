@@ -601,14 +601,16 @@ remove_path() {
     return 1
 }
 
-# Every running unit that holds files under the folders about to go, stopped
-# first so removal does not race a running node: the four core services, the
-# lab dashboards and autonomy (neoracer-*.service, installed by the driver's
-# setup_services.sh) and the vendor image's jupyterlab.service, which serves
-# ~/jupyter_ws until the driver's phase 8 retires it. Stopped, not disabled:
-# the driver's setup decides what runs at boot.
+# Every running or restarting unit that holds files under the folders about to
+# go, stopped first so removal does not race a running node: the four core
+# services, the lab dashboards and autonomy (neoracer-*.service, installed by
+# the driver's setup_services.sh) and the vendor image's jupyterlab.service,
+# which serves ~/jupyter_ws until the driver's phase 8 retires it. A unit
+# waiting out its RestartSec after a crash is "activating", not "active", so
+# both states are listed; stopping it also cancels the pending restart.
+# Stopped, not disabled: the driver's setup decides what runs at boot.
 running_services() {
-    systemctl list-units --type=service --state=active --plain --no-legend \
+    systemctl list-units --type=service --state=active,activating --plain --no-legend \
         'neoracer-*.service' 'jupyterlab.service' 2>/dev/null | awk '{print $1}'
 }
 if command -v systemctl >/dev/null 2>&1; then
