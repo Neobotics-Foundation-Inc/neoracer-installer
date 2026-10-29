@@ -47,6 +47,9 @@ For Jetson Orin Nano and Orin NX running JetPack 6.x (Ubuntu 22.04) with ROS2 Hu
     - Review the directories it lists and type `yes` to confirm the erase
     - Enter your sudo password once when prompted
     - Wait 30 to 60 minutes while the driver, ROS2, and the GPU stack install
+    - If the ROS2 Humble install stops with `Unable to fetch some archives`,
+      the Jetson's package lists are out of date. Run `sudo apt-get update`,
+      then run the installer again.
 
 4. Reboot when the script tells you to. Group membership, udev symlinks, and
    the car's services only take effect on the next boot.
