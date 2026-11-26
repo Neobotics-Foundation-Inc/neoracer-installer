@@ -10,7 +10,12 @@
 
 # static variables
 INSTALLER_VERSION="0.2.2"
-DRIVER_URL="https://github.com/Neobotics-Foundation-Inc/neoracer_ros2_driver.git"
+# The driver repository and, when set, the branch or tag to clone instead of
+# the default branch. Both mirror LIB_REPO and LIB_PIN in the driver's
+# setup_jupyter.sh: a way to test an unreleased revision on a car. The clone
+# keeps every branch, so `racecar update` still reaches main afterwards.
+DRIVER_URL="${DRIVER_URL:-https://github.com/Neobotics-Foundation-Inc/neoracer_ros2_driver.git}"
+DRIVER_REF="${DRIVER_REF:-}"
 DRIVER_NAME="neoracer_ros2_driver"
 LIDAR_NAME="lakibeam1"
 
@@ -67,6 +72,12 @@ Options:
   -y, --yes       Skip the confirmation prompt before erasing car software.
       --dry-run   Print every action without erasing, cloning, or installing.
   -h, --help      Show this message.
+
+Environment:
+  DRIVER_REF      Branch or tag of the driver to clone instead of the default
+                  branch, to test an unreleased revision. Example:
+                  DRIVER_REF=port/mit-0.9.0 bash neoracer-installer/scripts/install.sh
+  DRIVER_URL      Another driver repository, such as a fork.
 
 Steps:
   [1/3] Remove ~/jupyter_ws, ~/ros2_ws, ~/logs
@@ -473,8 +484,27 @@ if [ "$DRY_RUN" = false ]; then
         exit 1
     fi
     log "  [OK] driver repository reachable"
+    if [ -n "$DRIVER_REF" ]; then
+        # A branch is one line. An annotated tag is two: the tag object and the
+        # peeled commit (^{}); the commit is what the clone's HEAD will equal.
+        DRIVER_REMOTE_HEAD=$(GIT_TERMINAL_PROMPT=0 git ls-remote "$DRIVER_URL" \
+            "refs/heads/${DRIVER_REF}" "refs/tags/${DRIVER_REF}^{}" "refs/tags/${DRIVER_REF}" 2>/dev/null \
+            | awk '$2 ~ /\^\{\}$/ {peeled=$1} $2 !~ /\^\{\}$/ && !first {first=$1} END {print (peeled ? peeled : first)}')
+        if [ -z "$DRIVER_REMOTE_HEAD" ]; then
+            echo -e "\e[1;31m[ERROR] No branch or tag named '${DRIVER_REF}' at the driver repository.\e[0m"
+            log "  $DRIVER_URL"
+            log "DRIVER_REF names a branch or a tag, not a commit."
+            log "Nothing has been removed."
+            log_silent "========== INSTALL LOG END (ABORTED: DRIVER_REF not found) =========="
+            exit 1
+        fi
+        log "  [OK] DRIVER_REF ${DRIVER_REF} resolves to ${DRIVER_REMOTE_HEAD:0:7}"
+    fi
 else
     log "  [dry-run] skipping driver repository reachability check"
+    if [ -n "$DRIVER_REF" ]; then
+        log "  [dry-run] DRIVER_REF=${DRIVER_REF} would be cloned instead of the default branch"
+    fi
 fi
 
 # ============================================================================
@@ -490,6 +520,8 @@ DRIVER_REV_BEFORE="${DRIVER_VERSION_BEFORE%% *}"
 # prefix is ambiguous, so short forms are for display only.
 DRIVER_SHA_BEFORE=$(git -C "${SRC_DIR}/${DRIVER_NAME}" rev-parse HEAD 2>/dev/null)
 DRIVER_REMOTE_SHORT="${DRIVER_REMOTE_HEAD:0:7}"
+DRIVER_SOURCE="remote HEAD"
+[ -n "$DRIVER_REF" ] && DRIVER_SOURCE="${DRIVER_REF}, set by DRIVER_REF"
 
 log ""
 echo -e "\e[1;36m==========================================================================\e[0m"
@@ -504,16 +536,16 @@ fi
 if [ "$DRY_RUN" = true ]; then
     log "  incoming:   not checked (dry run)"
 elif [ -z "$DRIVER_VERSION_BEFORE" ]; then
-    log "  incoming:   ${DRIVER_REMOTE_SHORT} (remote HEAD)"
+    log "  incoming:   ${DRIVER_REMOTE_SHORT} (${DRIVER_SOURCE})"
     log "  status:     first install"
 elif [ "$DRIVER_SHA_BEFORE" = "$DRIVER_REMOTE_HEAD" ]; then
-    log "  incoming:   ${DRIVER_REMOTE_SHORT} (remote HEAD)"
+    log "  incoming:   ${DRIVER_REMOTE_SHORT} (${DRIVER_SOURCE})"
     log "  status:     already at the newest revision; the run rebuilds it from scratch"
 else
-    log "  incoming:   ${DRIVER_REMOTE_SHORT} (remote HEAD)"
+    log "  incoming:   ${DRIVER_REMOTE_SHORT} (${DRIVER_SOURCE})"
     log "  status:     update available (${DRIVER_REV_BEFORE} -> ${DRIVER_REMOTE_SHORT})"
 fi
-log_silent "Driver remote HEAD: ${DRIVER_REMOTE_HEAD:-unknown}"
+log_silent "Driver incoming revision: ${DRIVER_REMOTE_HEAD:-unknown} (${DRIVER_SOURCE})"
 
 # The driver's setup scripts call sudo throughout. Prompt for the password now,
 # while the car still has its old software, instead of 20 minutes in.
@@ -695,9 +727,14 @@ if [ "$DRY_RUN" = false ] && ! cd "$SRC_DIR"; then
     exit 1
 fi
 
-log "Cloning ${DRIVER_URL}"
 CLONE_RC=0
-run_cmd git clone "$DRIVER_URL" || CLONE_RC=$?
+if [ -n "$DRIVER_REF" ]; then
+    log "Cloning ${DRIVER_URL} at ${DRIVER_REF}"
+    run_cmd git clone --branch "$DRIVER_REF" "$DRIVER_URL" || CLONE_RC=$?
+else
+    log "Cloning ${DRIVER_URL}"
+    run_cmd git clone "$DRIVER_URL" || CLONE_RC=$?
+fi
 
 SETUP_SCRIPT="${SRC_DIR}/${DRIVER_NAME}/scripts/setup_all.sh"
 SETUP_RC=0

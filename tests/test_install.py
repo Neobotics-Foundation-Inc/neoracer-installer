@@ -41,9 +41,12 @@ def sandbox(tmp_path: Path) -> tuple[Path, Path]:
     return home, installer / "scripts" / "install.sh"
 
 
-def run_installer(home: Path, script: Path, *args: str) -> subprocess.CompletedProcess[str]:
+def run_installer(
+    home: Path, script: Path, *args: str, extra_env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
     env = dict(os.environ)
     env["HOME"] = str(home)
+    env.update(extra_env or {})
     return subprocess.run(
         ["bash", str(script), *args],
         env=env,
@@ -131,6 +134,37 @@ def test_data_root_is_never_erased_or_created(sandbox: tuple[Path, Path]) -> Non
     assert f"mkdir -p {home}/data" not in out
     log = next((script.parent.parent / "logs").glob("*.log")).read_text()
     assert "dir.neoracer_data.size_kb" in log
+
+
+def test_driver_ref_selects_the_clone_branch(sandbox: tuple[Path, Path]) -> None:
+    # DRIVER_REF names a branch or tag to install instead of the default branch,
+    # for testing an unreleased driver on a car. Unset, the clone is unchanged.
+    home, script = sandbox
+    out = run_installer(home, script, "--dry-run", "--yes").stdout
+    assert "--branch" not in out
+
+    out = run_installer(
+        home, script, "--dry-run", "--yes", extra_env={"DRIVER_REF": "port/mit-0.9.0"}
+    ).stdout
+    assert "DRIVER_REF=port/mit-0.9.0 would be cloned instead of the default branch" in out
+    assert (
+        "git clone --branch port/mit-0.9.0 "
+        "https://github.com/Neobotics-Foundation-Inc/neoracer_ros2_driver.git"
+    ) in out
+
+
+def test_driver_ref_is_resolved_before_the_erase(script_source: str) -> None:
+    # A misspelled ref must stop the run while the car still has its software.
+    lookup = script_source.index('"refs/heads/${DRIVER_REF}"')
+    removal = script_source.index("[1/3] Removing existing systems and code")
+    assert lookup < removal
+    assert "No branch or tag named" in script_source[lookup:removal]
+
+
+def test_help_documents_driver_ref() -> None:
+    result = subprocess.run(["bash", str(INSTALL_SH), "--help"], capture_output=True, text=True)
+    assert "DRIVER_REF" in result.stdout
+    assert "DRIVER_URL" in result.stdout
 
 
 def test_each_run_writes_its_own_log(sandbox: tuple[Path, Path]) -> None:
