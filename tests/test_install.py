@@ -167,6 +167,90 @@ def test_help_documents_driver_ref() -> None:
     assert "DRIVER_URL" in result.stdout
 
 
+DRIVER_0_9_0_UNITS = (
+    "neoracer-teleop.service",
+    "neoracer-watchdog.service",
+    "neoracer-dashboard.service",
+    "neoracer-jupyter.service",
+    "neoracer-data.service",
+    "neoracer-mapview.service",
+    "neoracer-autonomy.service",
+    "neoracer-camlabel.service",
+    "neoracer-wallfollow.service",
+    "neoracer-pursuit.service",
+    "neoracer-eps.service",
+    "neoracer-smartfollow.service",
+    "neoracer-linefollow.service",
+    "neoracer-webteleop.service",
+)
+
+
+def test_checks_name_every_driver_0_9_0_unit_and_file(script_source: str) -> None:
+    # What the driver's setup_services.sh and setup_ros2.sh install at 0.9.0.
+    for unit in DRIVER_0_9_0_UNITS:
+        assert unit in script_source, f"{unit} is not checked"
+    assert '"/etc/sudoers.d/neoracer"' in script_source
+    assert '"/etc/profile.d/neoracer-data.sh"' in script_source
+    for pkg in (
+        "ros-humble-slam-toolbox",
+        "ros-humble-nav2-map-server",
+        "ros-humble-nav2-amcl",
+        "ros-humble-nav2-lifecycle-manager",
+        "ros-humble-robot-state-publisher",
+        "ros-humble-xacro",
+        "ros-humble-rosbag2-storage-mcap",
+    ):
+        assert pkg in script_source, f"{pkg} is not checked"
+
+
+def test_snapshot_records_every_unit_and_the_driver_release(sandbox: tuple[Path, Path]) -> None:
+    home, script = sandbox
+    run_installer(home, script, "--dry-run", "--yes")
+    log = next((script.parent.parent / "logs").glob("*.log")).read_text()
+    for unit in DRIVER_0_9_0_UNITS:
+        name = unit.removesuffix(".service")
+        assert f"svc.{name}.enabled=" in log
+        assert f"svc.{name}.active=" in log
+    assert "ws.driver_pkg_version=" in log
+
+
+def _fake_driver_checkout(home: Path, version: str) -> None:
+    driver = home / "ros2_ws" / "src" / "neoracer_ros2_driver"
+    (driver / ".git").mkdir(parents=True)
+    (driver / "package.xml").write_text(
+        f"<package><name>neoracer_ros2_driver</name><version>{version}</version></package>\n"
+    )
+
+
+def test_driver_release_must_match_the_installer(sandbox: tuple[Path, Path], script_source: str) -> None:
+    # The installer's major.minor is the driver release it installs; the check reads
+    # the driver's package.xml and fails on any other release.
+    home, script = sandbox
+    installer_version = re.search(r'^INSTALLER_VERSION="(\d+\.\d+)\.\d+"$', script_source, re.MULTILINE)
+    assert installer_version
+    release = installer_version.group(1)
+
+    # Verdict tags carry colour codes, so the assertions match the text after them.
+    out = run_installer(home, script, "--dry-run", "--yes").stdout
+    assert "driver version unreadable" in out
+
+    _fake_driver_checkout(home, f"{release}.7")
+    out = run_installer(home, script, "--dry-run", "--yes").stdout
+    assert f"driver {release}.7 matches installer" in out
+
+    shutil.rmtree(home / "ros2_ws" / "src" / "neoracer_ros2_driver")
+    _fake_driver_checkout(home, "0.1.0")
+    out = run_installer(home, script, "--dry-run", "--yes").stdout
+    assert "driver 0.1.0 does not match installer" in out
+
+
+def test_sudoers_check_is_a_warning_in_a_dry_run(sandbox: tuple[Path, Path]) -> None:
+    # Reading /etc/sudoers.d needs root; a dry run never asks for a password.
+    home, script = sandbox
+    out = run_installer(home, script, "--dry-run", "--yes").stdout
+    assert "/etc/sudoers.d/neoracer not checked (needs sudo; dry run)" in out
+
+
 def test_each_run_writes_its_own_log(sandbox: tuple[Path, Path]) -> None:
     home, script = sandbox
     log_dir = script.parent.parent / "logs"

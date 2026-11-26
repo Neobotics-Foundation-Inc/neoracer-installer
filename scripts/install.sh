@@ -39,12 +39,50 @@ WIPE_PATHS=("$JUPYTER_WS" "$WS_DIR" "$CAR_LOG_DIR")
 # Paths created by step 2.
 CREATE_PATHS=("$SRC_DIR" "$CAR_LOG_DIR")
 
-# Core systemd units installed by the driver's setup_services.sh.
+# Units the driver's setup_services.sh installs at 0.9.0. The core stack is
+# enabled at boot. Autonomy and the lab dashboards are installed and not
+# enabled: `racecar service start <name>` runs one for a session.
 CORE_SERVICES=(
     neoracer-teleop.service
     neoracer-watchdog.service
     neoracer-dashboard.service
     neoracer-jupyter.service
+    neoracer-data.service
+    neoracer-mapview.service
+)
+ONDEMAND_SERVICES=(
+    neoracer-autonomy.service
+)
+DASHBOARD_SERVICES=(
+    neoracer-camlabel.service
+    neoracer-wallfollow.service
+    neoracer-pursuit.service
+    neoracer-eps.service
+    neoracer-smartfollow.service
+    neoracer-linefollow.service
+    neoracer-webteleop.service
+)
+ALL_SERVICES=("${CORE_SERVICES[@]}" "${ONDEMAND_SERVICES[@]}" "${DASHBOARD_SERVICES[@]}")
+
+# Files setup_services.sh installs outside the home folder: the sudo rules that
+# let racecar start and stop the units above, and the login-shell hook that
+# exports the data root.
+SUDOERS_FILE="/etc/sudoers.d/neoracer"
+PROFILE_FILE="/etc/profile.d/neoracer-data.sh"
+
+# ROS packages the driver's setup_ros2.sh installs beyond ros-base, checked
+# after the run. Mapping and navigation joined the list at 0.9.0.
+DRIVER_ROS_PKGS=(
+    ros-humble-ackermann-msgs
+    ros-humble-cv-bridge
+    ros-humble-foxglove-bridge
+    ros-humble-slam-toolbox
+    ros-humble-nav2-map-server
+    ros-humble-nav2-amcl
+    ros-humble-nav2-lifecycle-manager
+    ros-humble-robot-state-publisher
+    ros-humble-xacro
+    ros-humble-rosbag2-storage-mcap
 )
 
 # Get the full path of the current script
@@ -202,6 +240,11 @@ describe_checkout() {
     fi
 }
 
+# The driver's release number, from the <version> tag in its package.xml.
+driver_pkg_version() {
+    sed -n 's/.*<version>\([^<]*\)<\/version>.*/\1/p' "$1/package.xml" 2>/dev/null | head -1
+}
+
 # Device-tree strings are NUL-terminated.
 dt_read() {
     [ -r "$1" ] && tr -d '\0' < "$1"
@@ -309,12 +352,14 @@ PYEOF
         emit "ws.driver_branch" "$(git -C "$driver_dir" rev-parse --abbrev-ref HEAD 2>/dev/null)"
         emit "ws.driver_commit_date" "$(git -C "$driver_dir" log -1 --format='%cs' 2>/dev/null)"
         emit "ws.driver_dirty" "$([ -n "$(git -C "$driver_dir" status --porcelain 2>/dev/null)" ] && echo yes || echo no)"
+        emit "ws.driver_pkg_version" "$(driver_pkg_version "$driver_dir")"
     else
         emit "ws.driver_rev" "absent"
         emit "ws.driver_version" "absent"
         emit "ws.driver_branch" "absent"
         emit "ws.driver_commit_date" "absent"
         emit "ws.driver_dirty" "absent"
+        emit "ws.driver_pkg_version" "absent"
     fi
     if [ -d "${SRC_DIR}/${LIDAR_NAME}/.git" ]; then
         emit "ws.lidar_rev" "$(git -C "${SRC_DIR}/${LIDAR_NAME}" describe --tags --always 2>/dev/null)"
@@ -329,7 +374,7 @@ PYEOF
     done
 
     local svc
-    for svc in "${CORE_SERVICES[@]}"; do
+    for svc in "${ALL_SERVICES[@]}"; do
         emit "svc.${svc%.service}.enabled" "$(systemctl is-enabled "$svc" 2>/dev/null || echo absent)"
         emit "svc.${svc%.service}.active" "$(systemctl is-active "$svc" 2>/dev/null || echo inactive)"
     done
@@ -894,6 +939,19 @@ else
     check_fail "setup_all.sh missing from the checkout"
 fi
 
+# The installer's version follows the driver release it installs, so the two
+# share a major.minor. A different driver means this installer is ahead of or
+# behind the car, and the checks below describe a release the car is not on.
+DRIVER_PKG_VERSION=$(driver_pkg_version "${SRC_DIR}/${DRIVER_NAME}")
+INSTALLER_RELEASE="${INSTALLER_VERSION%.*}"
+if [ -z "$DRIVER_PKG_VERSION" ]; then
+    check_fail "driver version unreadable (${SRC_DIR}/${DRIVER_NAME}/package.xml)"
+elif [ "${DRIVER_PKG_VERSION%.*}" = "$INSTALLER_RELEASE" ]; then
+    check_pass "driver ${DRIVER_PKG_VERSION} matches installer ${INSTALLER_VERSION} (release ${INSTALLER_RELEASE})"
+else
+    check_fail "driver ${DRIVER_PKG_VERSION} does not match installer ${INSTALLER_VERSION}; this installer is for driver ${INSTALLER_RELEASE}.x"
+fi
+
 section "Step 3, phase 1-2: ROS2 Humble and dev tools"
 
 if [ -f /opt/ros/humble/setup.bash ]; then
@@ -909,13 +967,13 @@ else
 fi
 
 MISSING_ROS_PKGS=""
-for pkg in ros-humble-ackermann-msgs ros-humble-cv-bridge ros-humble-foxglove-bridge; do
+for pkg in "${DRIVER_ROS_PKGS[@]}"; do
     dpkg -s "$pkg" >/dev/null 2>&1 || MISSING_ROS_PKGS="${MISSING_ROS_PKGS} ${pkg}"
 done
 if [ -z "$MISSING_ROS_PKGS" ]; then
-    check_pass "driver ROS packages installed (ackermann-msgs, cv-bridge, foxglove-bridge)"
+    check_pass "all ${#DRIVER_ROS_PKGS[@]} driver ROS packages installed (messages, bridges, SLAM, Nav2, robot model, mcap bags)"
 else
-    check_fail "missing ROS packages:${MISSING_ROS_PKGS}"
+    check_fail "missing ROS packages:${MISSING_ROS_PKGS}; re-run scripts/setup_ros2.sh"
 fi
 
 MISSING_TOOLS=""
@@ -1060,20 +1118,79 @@ else
     check_fail "racecar_core not importable from a plain python3"
 fi
 
+# setup_jupyter.sh creates the data root's maps folder and links the root and
+# its maps into the JupyterLab file browser, which is rooted at ~/jupyter_ws.
+if [ -d "$DATA_ROOT" ]; then
+    check_pass "data root present (${DATA_ROOT}, kept across installs)"
+else
+    check_fail "data root ${DATA_ROOT} missing; re-run scripts/setup_jupyter.sh"
+fi
+
+for link in data maps; do
+    LINK_TARGET=$(readlink "${JUPYTER_WS}/${link}" 2>/dev/null)
+    if [ -n "$LINK_TARGET" ] && [ -d "${JUPYTER_WS}/${link}" ]; then
+        check_pass "~/jupyter_ws/${link} links to ${LINK_TARGET}"
+    else
+        check_fail "~/jupyter_ws/${link} is not a link to the data root; re-run scripts/setup_jupyter.sh"
+    fi
+done
+
 section "Step 3, phase 8: systemd services"
 
 if command -v systemctl >/dev/null 2>&1; then
     for svc in "${CORE_SERVICES[@]}"; do
         if [ ! -f "/etc/systemd/system/${svc}" ]; then
             check_fail "${svc} not installed"
-        elif systemctl is-enabled --quiet "$svc" 2>/dev/null; then
+        elif [ "$(systemctl is-enabled "$svc" 2>/dev/null)" = "enabled" ]; then
             check_pass "${svc} installed and enabled at boot"
         else
             check_fail "${svc} installed but not enabled"
         fi
     done
+
+    # Autonomy has no [Install] section, so is-enabled says "static"; a lab
+    # dashboard is installed disabled. Either way the unit must not start at boot.
+    for svc in "${ONDEMAND_SERVICES[@]}" "${DASHBOARD_SERVICES[@]}"; do
+        SVC_STATE=$(systemctl is-enabled "$svc" 2>/dev/null)
+        if [ ! -f "/etc/systemd/system/${svc}" ]; then
+            check_fail "${svc} not installed; re-run scripts/setup_services.sh"
+        elif [ "$SVC_STATE" = "enabled" ]; then
+            check_fail "${svc} is enabled at boot; the driver installs it for on-demand starts only"
+        else
+            check_pass "${svc} installed, not enabled at boot (${SVC_STATE:-no boot link})"
+        fi
+    done
+
+    # The vendor image's jupyterlab.service binds port 8888, the same port as
+    # neoracer-jupyter; setup_services.sh disables it.
+    if [ "$(systemctl is-enabled jupyterlab.service 2>/dev/null)" = "enabled" ]; then
+        check_fail "vendor jupyterlab.service still enabled; it takes port 8888 from neoracer-jupyter"
+    else
+        check_pass "vendor jupyterlab.service not enabled"
+    fi
 else
     check_warn "systemctl unavailable; cannot verify services"
+fi
+
+# setup_services.sh installs the sudo rules as root, mode 0440. /etc/sudoers.d
+# is readable by root only; sudo -n uses the password cached at preflight and
+# never prompts, so a dry run reports this check as not run.
+if SUDOERS_STAT=$(sudo -n stat -c '%a %U %G' "$SUDOERS_FILE" 2>/dev/null); then
+    if [ "$SUDOERS_STAT" = "440 root root" ]; then
+        check_pass "sudo rules installed (${SUDOERS_FILE}, mode 440, owner root)"
+    else
+        check_fail "${SUDOERS_FILE} has mode and owner '${SUDOERS_STAT}', expected '440 root root'"
+    fi
+elif [ "$DRY_RUN" = true ]; then
+    check_warn "${SUDOERS_FILE} not checked (needs sudo; dry run)"
+else
+    check_fail "${SUDOERS_FILE} missing; re-run scripts/setup_services.sh"
+fi
+
+if [ -f "$PROFILE_FILE" ]; then
+    check_pass "login shells export the data root (${PROFILE_FILE})"
+else
+    check_fail "${PROFILE_FILE} missing; re-run scripts/setup_services.sh"
 fi
 
 section "Run log"
