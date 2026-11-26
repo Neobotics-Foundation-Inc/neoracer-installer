@@ -35,9 +35,9 @@ def sandbox(tmp_path: Path) -> tuple[Path, Path]:
     installer = home / "neoracer-installer"
     (installer / "scripts").mkdir(parents=True)
     shutil.copy2(INSTALL_SH, installer / "scripts" / "install.sh")
-    for name in ("jupyter_ws", "ros2_ws/src", "data", "logs"):
+    for name in ("jupyter_ws", "ros2_ws/src", "neoracer_data", "logs"):
         (home / name).mkdir(parents=True)
-    (home / "data" / "run.bag").write_text("payload")
+    (home / "neoracer_data" / "run.bag").write_text("payload")
     return home, installer / "scripts" / "install.sh"
 
 
@@ -89,9 +89,9 @@ def test_dry_run_keeps_every_file(sandbox: tuple[Path, Path]) -> None:
     home, script = sandbox
     result = run_installer(home, script, "--dry-run", "--yes")
     assert result.returncode == 0, result.stdout
-    for name in ("jupyter_ws", "ros2_ws", "data", "logs"):
+    for name in ("jupyter_ws", "ros2_ws", "neoracer_data", "logs"):
         assert (home / name).is_dir()
-    assert (home / "data" / "run.bag").read_text() == "payload"
+    assert (home / "neoracer_data" / "run.bag").read_text() == "payload"
 
 
 def test_dry_run_reports_every_step(sandbox: tuple[Path, Path]) -> None:
@@ -116,10 +116,21 @@ def test_dry_run_plans_the_documented_commands(sandbox: tuple[Path, Path]) -> No
     out = run_installer(home, script, "--dry-run", "--yes").stdout
     assert f"would remove {home}/jupyter_ws" in out
     assert f"mkdir -p {home}/ros2_ws/src" in out
-    assert f"mkdir -p {home}/data" in out
     assert f"mkdir -p {home}/logs" in out
     assert "git clone https://github.com/Neobotics-Foundation-Inc/neoracer_ros2_driver.git" in out
     assert f"bash {home}/ros2_ws/src/neoracer_ros2_driver/scripts/setup_all.sh" in out
+
+
+def test_data_root_is_never_erased_or_created(sandbox: tuple[Path, Path]) -> None:
+    # Bags, maps and datasets live in ~/neoracer_data, which a reinstall must leave alone.
+    # ~/data is no longer created: driver 0.9.0 writes nothing there, and its setup
+    # moves an older car's camlabel images out of it into the data root.
+    home, script = sandbox
+    out = run_installer(home, script, "--dry-run", "--yes").stdout
+    assert f"would remove {home}/neoracer_data" not in out
+    assert f"mkdir -p {home}/data" not in out
+    log = next((script.parent.parent / "logs").glob("*.log")).read_text()
+    assert "dir.neoracer_data.size_kb" in log
 
 
 def test_each_run_writes_its_own_log(sandbox: tuple[Path, Path]) -> None:
@@ -226,8 +237,8 @@ def test_removal_refuses_a_target_outside_home(sandbox: tuple[Path, Path], tmp_p
     outside = tmp_path / "elsewhere"
     outside.mkdir()
     (outside / "important.txt").write_text("keep")
-    shutil.rmtree(home / "data")
-    (home / "data").symlink_to(outside)
+    shutil.rmtree(home / "logs")
+    (home / "logs").symlink_to(outside)
 
     out = run_installer(home, script, "--dry-run", "--yes").stdout
     assert "refusing to remove" in out

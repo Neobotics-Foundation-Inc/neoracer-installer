@@ -22,14 +22,17 @@ CAR_HOME="/home/${CAR_USER}"
 WS_DIR="$HOME/ros2_ws"
 SRC_DIR="$WS_DIR/src"
 JUPYTER_WS="$HOME/jupyter_ws"
-DATA_DIR="$HOME/data"
 CAR_LOG_DIR="$HOME/logs"
 
+# The car's data root at driver 0.9.0: bags, maps, datasets, dashboard logs.
+# Never erased or created here; the driver's setup moves old data into it.
+DATA_ROOT="$HOME/neoracer_data"
+
 # Paths wiped by step 1, in removal order.
-WIPE_PATHS=("$JUPYTER_WS" "$WS_DIR" "$DATA_DIR" "$CAR_LOG_DIR")
+WIPE_PATHS=("$JUPYTER_WS" "$WS_DIR" "$CAR_LOG_DIR")
 
 # Paths created by step 2.
-CREATE_PATHS=("$SRC_DIR" "$DATA_DIR" "$CAR_LOG_DIR")
+CREATE_PATHS=("$SRC_DIR" "$CAR_LOG_DIR")
 
 # Core systemd units installed by the driver's setup_services.sh.
 CORE_SERVICES=(
@@ -66,8 +69,8 @@ Options:
   -h, --help      Show this message.
 
 Steps:
-  [1/3] Remove ~/jupyter_ws, ~/ros2_ws, ~/data, ~/logs
-  [2/3] Create ~/ros2_ws/src, ~/data, ~/logs
+  [1/3] Remove ~/jupyter_ws, ~/ros2_ws, ~/logs
+  [2/3] Create ~/ros2_ws/src, ~/logs
   [3/3] Clone the driver and run scripts/setup_all.sh
 
 Every run is logged to neoracer-installer/logs/.
@@ -310,7 +313,7 @@ PYEOF
     emit "ws.installed_packages" "$(ls -1 "${ws_dir}/install" 2>/dev/null | grep -cv '^\(setup\.\|local_setup\|_local_setup\|COLCON_IGNORE\)' )"
 
     local path
-    for path in "$JUPYTER_WS" "$WS_DIR" "$DATA_DIR" "$CAR_LOG_DIR"; do
+    for path in "$JUPYTER_WS" "$WS_DIR" "$CAR_LOG_DIR" "$DATA_ROOT"; do
         emit "dir.$(basename "$path").size_kb" "$(du -sk "$path" 2>/dev/null | cut -f1)"
     done
 
@@ -549,8 +552,8 @@ for path in "${WIPE_PATHS[@]}"; do
     fi
 done
 echo ""
-echo "Anything you saved in these folders, including notebooks in ~/jupyter_ws"
-echo "and recordings in ~/data, is gone for good. Back them up first."
+echo "Anything you saved in these folders, including notebooks in ~/jupyter_ws,"
+echo "is gone for good. Back them up first."
 echo -e "==========================================================================\e[0m"
 log ""
 
