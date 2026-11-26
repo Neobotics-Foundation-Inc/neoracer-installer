@@ -266,6 +266,24 @@ def test_root_is_refused(script_source: str) -> None:
     assert "Do not run this installer as root" in script_source
 
 
+def test_racecar_user_required_before_removal(script_source: str) -> None:
+    # The driver's setup stops for any other account; the installer checks first, before the erase.
+    assert 'CAR_USER="racecar"' in script_source
+    guard = script_source.index('[ "$CURRENT_USER" != "$CAR_USER" ]')
+    snapshot = script_source.index('snapshot_state "before"')
+    removal = script_source.index("[1/3] Removing existing systems and code")
+    assert guard < snapshot < removal
+    assert "Nothing has been removed." in script_source[guard:snapshot]
+
+
+def test_dry_run_reports_the_user_check(sandbox: tuple[Path, Path]) -> None:
+    # The sandbox home is never /home/racecar, so a dry run must say a real run would stop.
+    home, script = sandbox
+    out = run_installer(home, script, "--dry-run", "--yes").stdout
+    assert "a real run would stop here" in out
+    assert f"home {home}" in out
+
+
 def test_removal_guard_covers_home_and_root(script_source: str) -> None:
     assert '""|"/"|"$HOME"|"$HOME/")' in script_source
 

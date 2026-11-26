@@ -14,6 +14,11 @@ DRIVER_URL="https://github.com/Neobotics-Foundation-Inc/neoracer_ros2_driver.git
 DRIVER_NAME="neoracer_ros2_driver"
 LIDAR_NAME="lakibeam1"
 
+# The driver's units, sudoers rules and setup_all.sh are written for this
+# account and home folder. Any other account ends the run before the erase.
+CAR_USER="racecar"
+CAR_HOME="/home/${CAR_USER}"
+
 WS_DIR="$HOME/ros2_ws"
 SRC_DIR="$WS_DIR/src"
 JUPYTER_WS="$HOME/jupyter_ws"
@@ -406,6 +411,25 @@ if [ "$(id -u)" -eq 0 ]; then
     log "Run it as the car's normal user; it asks for a sudo password when needed."
     log_silent "========== INSTALL LOG END (ABORTED: running as root) =========="
     exit 1
+fi
+
+# At 0.9.0 the driver's setup_all.sh stops for any user other than racecar or
+# any home other than /home/racecar. Checked here, so the car is not erased
+# first and left with nothing rebuilt. A dry run reports it and continues.
+CURRENT_USER=$(id -un)
+if [ "$CURRENT_USER" != "$CAR_USER" ] || [ "$HOME" != "$CAR_HOME" ]; then
+    if [ "$DRY_RUN" = true ]; then
+        log "  [dry-run] a real run would stop here: user ${CURRENT_USER}, home ${HOME}; the driver is set up for user ${CAR_USER} with home ${CAR_HOME}"
+    else
+        echo -e "\e[1;31m[ERROR] This installer runs as the ${CAR_USER} user with home ${CAR_HOME}.\e[0m"
+        log "This is user ${CURRENT_USER} with home ${HOME}."
+        log "The driver's services and sudo rules name ${CAR_USER}, so its setup stops on any other account."
+        log "Nothing has been removed."
+        log_silent "========== INSTALL LOG END (ABORTED: not the ${CAR_USER} user) =========="
+        exit 1
+    fi
+else
+    log "  [OK] running as ${CAR_USER} with home ${CAR_HOME}"
 fi
 
 MISSING_TOOLS=""
