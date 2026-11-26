@@ -9,7 +9,9 @@
 # Usage: bash neoracer-installer/scripts/install.sh [-y] [--dry-run]
 
 # static variables
-INSTALLER_VERSION="0.2.2"
+# The version follows the driver release the installer sets a car up for:
+# installer 0.9.x installs and checks driver 0.9.x.
+INSTALLER_VERSION="0.9.0"
 # The driver repository and, when set, the branch or tag to clone instead of
 # the default branch. Both mirror LIB_REPO and LIB_PIN in the driver's
 # setup_jupyter.sh: a way to test an unreleased revision on a car. The clone
@@ -629,8 +631,14 @@ for path in "${WIPE_PATHS[@]}"; do
     fi
 done
 echo ""
-echo "Anything you saved in these folders, including notebooks in ~/jupyter_ws,"
-echo "is gone for good. Back them up first."
+log "Anything you saved in these folders is gone for good: notebooks in"
+log "~/jupyter_ws, and the tuning saved inside old lab dashboard checkouts"
+log "under ~/ros2_ws. Back them up first."
+echo ""
+log "Kept: ${DATA_ROOT} (bags, maps, datasets), ~/.config/racecar (the car"
+log "profile) and ~/osracer_ws (the vendor workspace)."
+echo ""
+log "A car that already runs the driver keeps everything with: racecar update"
 echo -e "==========================================================================\e[0m"
 log ""
 

@@ -244,6 +244,17 @@ def test_driver_release_must_match_the_installer(sandbox: tuple[Path, Path], scr
     assert "driver 0.1.0 does not match installer" in out
 
 
+def test_confirmation_names_what_is_kept(sandbox: tuple[Path, Path]) -> None:
+    # The prompt says what the erase destroys, what survives it, and that a car
+    # already on the driver has racecar update instead.
+    home, script = sandbox
+    out = run_installer(home, script, "--dry-run", "--yes").stdout
+    assert f"Kept: {home}/neoracer_data" in out
+    assert "~/.config/racecar" in out
+    assert "lab dashboard checkouts" in out
+    assert "racecar update" in out
+
+
 def test_sudoers_check_is_a_warning_in_a_dry_run(sandbox: tuple[Path, Path]) -> None:
     # Reading /etc/sudoers.d needs root; a dry run never asks for a password.
     home, script = sandbox

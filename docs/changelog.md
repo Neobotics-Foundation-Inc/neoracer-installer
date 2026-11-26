@@ -1,7 +1,9 @@
 # Changelog
 
 All notable changes to this project. Format: Keep a Changelog
-(keepachangelog.com). Versioning: Semantic Versioning (semver.org).
+(keepachangelog.com). Versioning: from 0.9.0 the installer's version follows
+the driver release it installs; installer 0.9.x sets up a car for driver 0.9.x.
+Earlier entries numbered the installer on its own.
 
 ## [Unreleased]
 
@@ -9,6 +11,24 @@ All notable changes to this project. Format: Keep a Changelog
 ### Changed
 ### Fixed
 ### Removed
+
+## [0.9.0] - 2026-11-26
+
+### Added
+- Preflight check that the run is the `racecar` user with home `/home/racecar`, before anything is erased. Driver 0.9.0's `setup_all.sh` stops on any other account, which used to leave an erased car with nothing rebuilt. A dry run reports the check and continues.
+- `DRIVER_REF`: a branch or tag of the driver to clone instead of the default branch, to install an unreleased revision on a test car. Preflight resolves it before the erase and stops the run when it does not exist. `DRIVER_URL` names another repository, such as a fork. The clone keeps every branch, so `racecar update` still reaches `main` afterwards.
+- Diagnostic that the driver's `package.xml` version shares the installer's major.minor, so a car on another release is reported in one line.
+- Diagnostics for what driver 0.9.0 installs: the seven ROS packages added for mapping and navigation (slam-toolbox, nav2-map-server, nav2-amcl, nav2-lifecycle-manager, robot-state-publisher, xacro, rosbag2-storage-mcap); the data root `~/neoracer_data` and the `~/jupyter_ws/data` and `~/jupyter_ws/maps` links into it; `neoracer-data` and `neoracer-mapview` enabled at boot beside the four core units; `neoracer-autonomy` and the seven lab dashboard units installed and not enabled; the vendor `jupyterlab.service` not enabled; `/etc/sudoers.d/neoracer` as mode 440 owned by root, read through sudo; `/etc/profile.d/neoracer-data.sh`. A healthy car passes 53 checks.
+- Snapshots record `ws.driver_pkg_version`, the size of the data root, and the enable and active state of all fourteen units.
+- The confirmation prompt names what is kept (`~/neoracer_data`, `~/.config/racecar`, `~/osracer_ws`), warns that the tuning inside old lab dashboard checkouts under `~/ros2_ws` is erased, and points a car that already runs the driver to `racecar update`.
+
+### Changed
+- Version numbering: 0.9.0 follows driver 0.9.0. The number says which driver release the installer installs and checks.
+- A core unit counts as enabled only when `systemctl is-enabled` says `enabled`; a unit with no `[Install]` section no longer passes that check.
+- README, guide and architecture page describe the 0.9.0 car: six units at boot, the apps page on port 8080, the map viewer on port 8088, the data root, the `racecar` account, and `racecar update` for a car that already runs the driver.
+
+### Removed
+- `~/data` is no longer erased or created. Driver 0.9.0 writes nothing there, and its setup moves an older car's camlabel images from `~/data/camlabel` into the data root, which the erase used to destroy first. The erase list is `~/jupyter_ws`, `~/ros2_ws` and `~/logs`.
 
 ## [0.2.2] - 2026-10-26
 
