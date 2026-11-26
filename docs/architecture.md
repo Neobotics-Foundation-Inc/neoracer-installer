@@ -21,22 +21,25 @@ directory is the only thing a run leaves behind in this repository.
 ## Run pipeline
 
 ```
-preflight (root, tools, state snapshot "before", repo reachable, sudo)
+preflight (root, racecar account, tools, state snapshot "before",
+           repo reachable, DRIVER_REF lookup, sudo)
    |
    v
 confirmation  ---- declined ----> exit 1, nothing removed
                                   (the "before" snapshot is kept)
    |
    v
-[1/3] remove  ~/jupyter_ws  ~/ros2_ws  ~/data  ~/logs
+[1/3] remove  ~/jupyter_ws  ~/ros2_ws  ~/logs
+              (kept: ~/neoracer_data  ~/.config/racecar  ~/osracer_ws)
    |
    v
-[2/3] create  ~/ros2_ws/src  ~/data  ~/logs
+[2/3] create  ~/ros2_ws/src  ~/logs
    |
    v
-[3/3] clone neoracer_ros2_driver -> bash scripts/setup_all.sh
+[3/3] clone neoracer_ros2_driver (DRIVER_REF, or the default branch)
+      -> bash scripts/setup_all.sh
           |
-          +-> [1/8] ROS2 Humble      [5/8] workspace build
+          +-> [1/8] ROS2 Humble      [5/8] workspace build + car profile
               [2/8] dev tools        [6/8] GPU stack
               [3/8] user environment [7/8] JupyterLab + student library
               [4/8] udev rules       [8/8] systemd services
@@ -50,14 +53,20 @@ reboot notice -> exit 0 or 1
 
 ## Interfaces
 
-- **Filesystem.** Erases and recreates `~/jupyter_ws`, `~/ros2_ws`, `~/data`,
-  `~/logs`. Writes `logs/install_<timestamp>.log` inside this repository.
+- **Filesystem.** Erases and recreates `~/jupyter_ws`, `~/ros2_ws`, `~/logs`.
+  Never touches `~/neoracer_data`, `~/.config/racecar` or `~/osracer_ws`.
+  Writes `logs/install_<timestamp>.log` inside this repository.
 - **Network.** `git ls-remote` and `git clone` against the driver repository.
   Everything else is fetched by the driver's setup scripts.
-- **systemd.** Stops the four core units before removal; reads their enable
-  state during diagnostics. Never starts them, so nothing launches mid-install.
+- **Environment.** `DRIVER_REF` (a branch or tag) and `DRIVER_URL` select what
+  is cloned. Unset, the default branch at HEAD.
+- **systemd.** Stops every running `neoracer-*` unit and the vendor
+  `jupyterlab.service` before removal; reads the enable state of the fourteen
+  0.9.0 units during diagnostics. Never starts them, so nothing launches
+  mid-install.
 - **sudo.** Authenticated once in preflight and refreshed by a background
-  keepalive for the length of the run; the keepalive is killed on exit.
+  keepalive for the length of the run; the keepalive is killed on exit. The
+  cached password also lets the diagnostics read `/etc/sudoers.d/neoracer`.
 - **State sources.** `/proc/device-tree` (model, board serial, compatible),
   `/etc/machine-id`, `/etc/nv_tegra_release`, `/sys/class/net/*/address`,
   `lsblk`, `lsusb`, `ip`, `dpkg-query`, and `importlib.metadata`. All read-only.
@@ -78,6 +87,9 @@ reboot notice -> exit 0 or 1
   driver phase that installs it, so a failure points at a specific script to
   re-run. Conditions outside the installer's control, such as unplugged
   hardware, are warnings rather than failures.
+- **Version.** The installer's version follows the driver release it installs
+  (installer 0.9.x for driver 0.9.x). A diagnostic compares the two, so a car
+  on another release is reported in one line instead of many failing checks.
 - **Failure visibility.** The run continues to diagnostics even when the driver
   setup exits non-zero, so the operator sees exactly which components landed.
 - **State fidelity.** A fact that cannot be read is recorded as `unknown` rather

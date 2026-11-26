@@ -1,7 +1,8 @@
 # Installer guide
 
-Entry point for putting a Neoracer car on the latest software. Erases the car's
-existing workspaces and reinstalls the ROS2 driver and everything it depends on.
+Entry point for putting a Neoracer car on the current software from a clean
+slate. Erases the car's software folders and reinstalls the ROS2 driver and
+everything it depends on. Installer 0.9.x sets up a car for driver 0.9.x.
 Target hardware: Jetson Orin Nano, JetPack 6.x / Ubuntu 22.04 (Jammy), ROS2 Humble.
 
 ## Table of contents
@@ -26,14 +27,21 @@ Target hardware: Jetson Orin Nano, JetPack 6.x / Ubuntu 22.04 (Jammy), ROS2 Humb
 
 A car arriving from a classroom, a shipment, or a half-finished install is in an
 unknown software state. This installer removes that state instead of patching
-it: the four car directories are deleted, recreated empty, and rebuilt from the
-current driver repository. The result is the same on every car regardless of
-what was on it before.
+it: three car folders (`~/jupyter_ws`, `~/ros2_ws`, `~/logs`) are deleted,
+recreated empty, and rebuilt from the driver repository. The result is the same
+on every car regardless of what was on it before. The car's data root
+`~/neoracer_data` and its profile `~/.config/racecar` are kept.
+
+A car that already runs the driver does not need the installer. `racecar update`
+pulls the latest driver, runs the same setup, and keeps the lab dashboard tuning
+and camlabel images that the erase here destroys. The installer is for a newly
+flashed card or a car whose driver folder is broken.
 
 The installer does not implement the install itself. It clones
 [neoracer_ros2_driver](https://github.com/Neobotics-Foundation-Inc/neoracer_ros2_driver)
 and runs that repository's `scripts/setup_all.sh`, which installs ROS2 Humble,
-the build tools, the udev rules, the workspace build, the GPU stack, JupyterLab,
+the build tools, the user environment, the udev rules, the workspace build with
+the car-profile migration, the GPU stack, JupyterLab with the student library,
 and the systemd services. What this repository adds is the clean slate around
 that run, a log of every run, and a diagnostic pass that checks each installed
 component afterward.
@@ -45,7 +53,9 @@ component afterward.
   gigabytes of apt and pip packages.
 - Wall power. A run takes 30 to 60 minutes on a fresh car and must not be
   interrupted.
-- An account on the car with sudo rights. Do not run the installer as root.
+- The `racecar` account, with sudo rights. The driver's units, sudo rules and
+  setup are written for that user and `/home/racecar`; on any other account
+  the installer stops before erasing anything. Do not run the installer as root.
 
 ## Usage
 
@@ -84,21 +94,32 @@ bash ~/neoracer-installer/scripts/install.sh
 Exit status is 0 when every diagnostic passes, 1 when any fails or the run is
 aborted. A `--dry-run` always exits 0.
 
+Environment variables:
+
+| Variable | Effect |
+| -------- | ------ |
+| `DRIVER_REF` | Branch or tag of the driver to clone instead of the default branch, to test an unreleased revision on a car. Preflight resolves it before the erase; a name the repository does not have stops the run. The clone keeps every branch, so `racecar update` reaches `main` afterwards. Example: `DRIVER_REF=port/mit-0.9.0 bash neoracer-installer/scripts/install.sh`. |
+| `DRIVER_URL` | Another driver repository, such as a fork. |
+
 ## Run steps
 
-1. **Removal.** `~/jupyter_ws`, `~/ros2_ws`, `~/data`, `~/logs`. Core services
-   are stopped first so removal does not race a running node. Each path is
-   removed on its own and only if it resolves inside `$HOME`.
-2. **Folder creation.** `~/ros2_ws/src`, `~/data`, `~/logs`. `~/jupyter_ws` is
-   recreated later by the driver's JupyterLab phase.
+1. **Removal.** `~/jupyter_ws`, `~/ros2_ws`, `~/logs`. Every running
+   `neoracer-*` unit and the vendor `jupyterlab.service` are stopped first so
+   removal does not race a running node. Each path is removed on its own and
+   only if it resolves inside `$HOME`. `~/neoracer_data`, `~/.config/racecar`
+   and `~/osracer_ws` are not touched.
+2. **Folder creation.** `~/ros2_ws/src`, `~/logs`. `~/jupyter_ws` is recreated
+   later by the driver's JupyterLab phase.
 3. **Driver clone and setup.** Clone the driver into `~/ros2_ws/src` and run
    `neoracer_ros2_driver/scripts/setup_all.sh`, whose eight phases are ROS2
-   Humble, dev tools, user environment, udev rules, workspace build, GPU stack,
-   JupyterLab, and systemd services. This is the long step.
+   Humble, dev tools, user environment, udev rules, workspace build (followed
+   by the move of per-car files into the car profile), GPU stack, JupyterLab
+   with the student library, and systemd services. This is the long step.
 
-Preflight checks run before step 1: sudo rights, the presence of `git` and
-`curl`, and a reachability probe of the driver repository. A car that cannot
-reach GitHub is stopped with its old software still intact.
+Preflight checks run before step 1: not root, the `racecar` account with home
+`/home/racecar`, the presence of `git` and `curl`, a reachability probe of the
+driver repository, the `DRIVER_REF` lookup when it is set, and sudo. A car that
+fails any of them is stopped with its old software still intact.
 
 ### Driver version reporting
 
@@ -109,15 +130,17 @@ without cloning anything:
 
 ```
 Driver version
-  installed:  9c6902a (v0.4.2, 2026-08-07) Merge pull request #15 from ...
-  incoming:   1f4ab90 (remote HEAD)
-  status:     update available (9c6902a -> 1f4ab90)
+  installed:  00d2993 (2026-10-27) Merge pull request #22 from Neobotics-Foundation-Inc/fix/apt
+  incoming:   f21ff52 (port/mit-0.9.0, set by DRIVER_REF)
+  status:     update available (00d2993 -> f21ff52)
 ```
 
-`status` reads `first install` when no checkout is present, and `already at the
-newest revision` when the car is current, in which case the run still rebuilds
-from scratch. After the driver setup returns, the same block reports `previous`,
-`installed`, and a `result` line naming the transition.
+The label after the incoming revision reads `remote HEAD` on a normal run. With
+`DRIVER_REF` set it names the branch or tag, as above. `status` reads `first
+install` when no checkout is present, and `already at the newest revision` when
+the car is current, in which case the run still rebuilds from scratch. After the
+driver setup returns, the same block reports `previous`, `installed`, and a
+`result` line naming the transition.
 
 Each revision line carries the short SHA, the exact tag when HEAD sits on one,
 the commit date, and the commit subject. Revisions are compared as full SHAs;
@@ -137,10 +160,15 @@ Once the driver setup returns, the installer verifies each component, grouped by
 the step and driver phase that installs it, so a failure names the script to
 re-run:
 
-- Workspace layout: the four directories exist.
-- Driver checkout: the clone is present and carries `setup_all.sh`.
-- ROS2 and dev tools: `/opt/ros/humble`, the `ros2` command, the driver's ROS
-  packages, `colcon` / `cmake` / `rosdep`.
+- Workspace layout: `~/ros2_ws/src` and `~/logs` exist, and the driver setup
+  recreated `~/jupyter_ws`.
+- Driver checkout: the clone is present, carries `setup_all.sh`, landed on the
+  revision preflight advertised, and its `package.xml` version shares the
+  installer's major.minor (installer 0.9.x for driver 0.9.x).
+- ROS2 and dev tools: `/opt/ros/humble`, the `ros2` command, the ten driver ROS
+  packages (ackermann messages, cv-bridge, the Foxglove bridge, slam-toolbox,
+  the Nav2 map server, AMCL and lifecycle manager, robot-state-publisher,
+  xacro, mcap bag storage), `colcon` / `cmake` / `rosdep`.
 - User environment: both `~/.bashrc` blocks, `racecar-tool.sh`, `dialout` and
   `video` group membership.
 - udev rules: `99-racecar.rules`, plus the `/dev/osrbot_*` symlinks.
@@ -148,14 +176,24 @@ re-run:
   `lakibeam1` packages, and driver visibility to `ros2 pkg list`.
 - GPU stack: `torch` with CUDA available, `tensorrt`, `ultralytics`.
 - JupyterLab: the `jupyter` binary, the student library and labs, the
-  `racecar_student.pth` path file, and an `import racecar_core`.
-- Services: the four core units installed and enabled at boot.
+  `racecar_student.pth` path file, an `import racecar_core`, the data root
+  `~/neoracer_data`, and the `~/jupyter_ws/data` and `~/jupyter_ws/maps` links
+  into it.
+- Services: six units installed and enabled at boot (`teleop`, `watchdog`,
+  `dashboard`, `jupyter`, `data`, `mapview`); `autonomy` and the seven lab
+  dashboard units (`camlabel`, `wallfollow`, `pursuit`, `eps`, `smartfollow`,
+  `linefollow`, `webteleop`) installed and not enabled; the vendor
+  `jupyterlab.service` not enabled; `/etc/sudoers.d/neoracer` as mode 440 owned
+  by root, read with the sudo password cached at preflight;
+  `/etc/profile.d/neoracer-data.sh`.
 - Run log: no command in the run exited non-zero.
 
 Results print as `[PASS]`, `[FAIL]`, or `[WARN]`. Warnings cover conditions the
 installer does not control; a `/dev/osrbot_*` symlink is missing whenever the
 device is unplugged or has not been re-plugged since the rules were installed.
-Warnings do not fail the run.
+Warnings do not fail the run. A healthy car with every device plugged in passes
+53 checks. In a dry run the sudoers file is a warning, because a dry run never
+asks for a password.
 
 ## Logs
 
@@ -196,9 +234,10 @@ Each snapshot covers:
   the `/dev/osrbot_*` symlink targets and video nodes.
 - **Software.** ROS and colcon package versions, and the versions of torch,
   torchvision, numpy, ultralytics, onnx, tensorrt, jupyterlab, opencv, pytest.
-- **Workspace and services.** Installer and driver revisions, whether the driver
-  checkout is dirty, the pinned lidar tag, the installed package count, the size
-  of each car directory, and the enable and active state of the four units.
+- **Workspace and services.** Installer and driver revisions, the driver's
+  `package.xml` version, whether the driver checkout is dirty, the pinned lidar
+  tag, the installed package count, the size of each erased folder and of the
+  data root, and the enable and active state of all fourteen units.
 
 The identifiers collected are device identifiers, and they stay in the local log
 file. Nothing reads credentials, key material, or Wi-Fi secrets.
@@ -226,10 +265,16 @@ leaves the car unable to open its serial devices.
 
 ## Data loss
 
-Step 1 deletes student notebooks in `~/jupyter_ws`, recordings and datasets in
-`~/data`, and runtime logs in `~/logs`. Copy anything worth keeping off the car
-before starting. The installer prints the size of each directory at the
-confirmation prompt.
+Step 1 deletes student notebooks in `~/jupyter_ws`, the driver checkout in
+`~/ros2_ws` with the tuning saved inside old lab dashboard checkouts, and
+runtime logs in `~/logs`. Copy anything worth keeping off the car before
+starting. The installer prints the size of each folder at the confirmation
+prompt.
+
+Kept: `~/neoracer_data` (bags, maps, datasets, dashboard logs),
+`~/.config/racecar` (the car profile) and `~/osracer_ws` (the vendor
+workspace). A car that already runs the driver keeps everything, tuning
+included, with `racecar update`.
 
 ## Troubleshooting
 
@@ -237,6 +282,9 @@ confirmation prompt.
 | ------- | ------------- |
 | `Cannot reach the driver repository` | No internet, or GitHub is blocked. Nothing was erased; fix the connection and re-run. |
 | `Do not run this installer as root` | Started with `sudo`. Re-run as the car's normal user; it escalates on its own. |
+| `This installer runs as the racecar user` | Started from another account. The driver's services and sudo rules are written for `racecar`. Log in as `racecar` and re-run; nothing was erased. |
+| `No branch or tag named ...` | `DRIVER_REF` names something the driver repository does not have. Check the spelling, or unset it for the default branch. Nothing was erased. |
+| `driver X does not match installer Y` | The driver on the default branch is another release than this installer is written for. Update the installer clone (`git -C ~/neoracer-installer pull`), or set `DRIVER_REF` to the matching release. |
 | `No terminal available to confirm the erase` | Started from a script or an ssh command without a tty. Re-run with `-y`. |
 | Setup fails partway | Re-run the installer. Every phase is idempotent, so a second run is safe. |
 | A single phase fails | Re-run just that phase, for example `bash ~/ros2_ws/src/neoracer_ros2_driver/scripts/setup_ml.sh`. The diagnostic names the script. |
@@ -260,6 +308,11 @@ See [architecture.md](architecture.md).
 ## Changelog
 
 Latest entries; full history in [changelog.md](changelog.md).
+
+### [0.9.0] - 2026-11-26
+- Added: preflight check for the `racecar` account before the erase; `DRIVER_REF` and `DRIVER_URL`; diagnostics for everything driver 0.9.0 installs and for the driver release matching the installer; snapshots of all fourteen units and the driver's package version; a confirmation prompt that names what is kept and points to `racecar update`.
+- Changed: the version follows the driver release (0.9.0 for driver 0.9.0); the docs describe the 0.9.0 car.
+- Removed: `~/data` is no longer erased or created.
 
 ### [0.2.2] - 2026-10-26
 - Changed: README notes the `Unable to fetch some archives` failure during the ROS2 Humble install and its fix (`sudo apt-get update`, then run the installer again).
