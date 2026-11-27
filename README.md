@@ -3,7 +3,8 @@
 This is the entry point for putting a Neoracer car on the current software from a
 clean slate. Everything runs from one script, `scripts/install.sh`. The script
 erases the car's software folders and reinstalls the ROS2 driver and everything it
-depends on. For more information on the driver, see [neoracer_ros2_driver](https://github.com/Neobotics-Foundation-Inc/neoracer_ros2_driver/tree/main).
+depends on. Before the erase, you choose whether `~/jupyter_ws`, with the students'
+notebooks, is kept. For more information on the driver, see [neoracer_ros2_driver](https://github.com/Neobotics-Foundation-Inc/neoracer_ros2_driver/tree/main).
 
 Installer 0.9.x sets up a car for driver 0.9.x. The two share a version number.
 
@@ -34,10 +35,12 @@ For Jetson Orin Nano and Orin NX running JetPack 6.x (Ubuntu 22.04) with ROS2 Hu
 - The `racecar` account, with sudo rights. The driver's services run as that
   user, and the installer stops before erasing anything on any other account.
   Do not run the installer as root.
-- A backup of anything you care about. The install erases `~/jupyter_ws`,
-  `~/ros2_ws` and `~/logs`, including the tuning saved inside old lab dashboard
-  checkouts under `~/ros2_ws`. It keeps `~/neoracer_data` (bags, maps,
-  datasets), `~/.config/racecar` (the car profile) and `~/osracer_ws`.
+- A backup of anything you care about. The install erases `~/ros2_ws` and
+  `~/logs`, including the tuning saved inside old lab dashboard checkouts under
+  `~/ros2_ws`. It erases `~/jupyter_ws` only when you choose to reinstall
+  everything, and it first moves that folder to a dated backup. It keeps
+  `~/neoracer_data` (bags, maps, datasets), `~/.config/racecar` (the car
+  profile) and `~/osracer_ws`.
 
 ## Installation
 
@@ -59,8 +62,23 @@ For Jetson Orin Nano and Orin NX running JetPack 6.x (Ubuntu 22.04) with ROS2 Hu
     bash neoracer-installer/scripts/install.sh
     ```
 
-    - Review the directories it lists and type `yes` to confirm the erase
     - Enter your sudo password once when prompted
+    - Choose what to reinstall:
+
+      ```
+      What should this run reinstall?
+        1) The driver and the student library. ~/jupyter_ws remains.
+        2) Everything. ~/jupyter_ws is erased too, and the newest labs are installed.
+      Choose 1 or 2 [1]:
+      ```
+
+      Choice 1, or Enter, keeps the notebooks and labs in `~/jupyter_ws` as
+      they are. Choice 2 moves `~/jupyter_ws` to a dated folder such as
+      `~/jupyter_ws-backup-20261127-141500` and installs the newest labs. The
+      backup stays until you delete it.
+    - Review the directories it lists and type `yes` to confirm the erase.
+      Both choices set the car's services back to their defaults. A service
+      you turned off starts at boot again.
     - Wait 30 to 60 minutes while the driver, ROS2, and the GPU stack install
     - If the ROS2 Humble install stops with `Unable to fetch some archives`,
       the Jetson's package lists are out of date. Run `sudo apt-get update`,
@@ -74,11 +92,15 @@ For Jetson Orin Nano and Orin NX running JetPack 6.x (Ubuntu 22.04) with ROS2 Hu
     ```
 
 To see what the installer would do without changing anything, run it with the
-`--dry-run` flag first:
+`--dry-run` flag first. It shows the same menu and prints the plan for your
+choice:
 
 ```bash
 bash neoracer-installer/scripts/install.sh --dry-run
 ```
+
+With the `-y` flag, the run reinstalls everything (choice 2) with no menu and no
+confirmation.
 
 ## Expected result
 
@@ -100,6 +122,10 @@ Running post-install diagnostics...
 The driver revision the car is on before the run, and the one it will be moved
 to, are both shown before you confirm the erase, and again once the driver is in
 place.
+
+The summary at the end follows your choice. After choice 1 it reads
+`Labs: kept as they were. Run 'racecar update --labs' to refresh them.` After
+choice 2 it names the backup folder.
 
 After the reboot you have a built `~/ros2_ws`, the `racecar` command in every new
 terminal, JupyterLab on port 8888, the apps page on port 8080, the map viewer on
