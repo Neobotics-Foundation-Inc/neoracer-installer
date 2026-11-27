@@ -109,7 +109,13 @@ again. The log records each answer and the choice.
 
 In both choices the services go back to their defaults: the core units start at
 boot, and autonomy and the lab dashboards do not. A service you turned off
-starts at boot again. `racecar service disable <name>` turns it off again.
+starts at boot again. `racecar service disable <name>` turns it off again. A lab
+dashboard you set to start at boot stays off until
+`racecar service enable <name>` turns it on again.
+
+Choice 1 keeps the labs through the driver setup's `RACECAR_LABS_REFRESH`
+setting, which the driver 0.9.0 release reads. A driver from before that setting,
+cloned with `DRIVER_REF`, copies the shipped labs over the kept ones.
 
 `-y` means choice 2 with no questions. Choice 1 is offered only in the menu.
 
@@ -142,9 +148,11 @@ Environment variables:
      that exists already stops the backup, so a backup never lands inside an
      older one. A failed backup ends the run before anything is erased, and
      the stopped units are started again. A missing `~/jupyter_ws` needs no
-     backup.
+     backup. When `~/jupyter_ws` is a link, the link moves, and the folder it
+     points to stays where it is.
    - Each installed `/etc/systemd/system/neoracer-*.service` is disabled and
-     its unit file removed, then `systemctl daemon-reload` runs, all through
+     its unit file removed. A `neoracer-*` boot link left without its unit
+     file is removed too. Then `systemctl daemon-reload` runs, all through
      sudo. `jupyterlab.service` and `/etc/sudoers.d/neoracer` are left alone.
    - `~/ros2_ws` and `~/logs` are removed. Each path is removed on its own and
      only if it resolves inside `$HOME`. `~/neoracer_data`, `~/.config/racecar`
@@ -320,7 +328,11 @@ installer prints the size of each folder at the confirmation prompt.
 Choice 1 keeps `~/jupyter_ws` as it is. Choice 2 moves it to
 `~/jupyter_ws-backup-YYYYMMDD-HHMMSS` before the erase, and the summary names
 the folder. Old backups stay until someone deletes them, so delete one when it
-is no longer needed.
+is no longer needed. JupyterLab shows only `~/jupyter_ws`, so copy a notebook
+back from a backup in a terminal, for example
+`cp ~/jupyter_ws-backup-20261127-141500/my_lab.ipynb ~/jupyter_ws/`. The
+`data` and `maps` entries in a backup are links into `~/neoracer_data`.
+`rm -rf` on the backup removes the links and leaves the data root as it is.
 
 Kept: `~/neoracer_data` (bags, maps, datasets, dashboard logs),
 `~/.config/racecar` (the car profile) and `~/osracer_ws` (the vendor
@@ -340,6 +352,8 @@ service settings included, with `racecar update`.
 | `No choice was made` | The menu's input ended, for example with Ctrl-D. Nothing was erased. Re-run and choose 1 or 2. |
 | `The backup of /home/racecar/jupyter_ws failed` | The move to the dated backup folder failed. The line above it names the folder. A folder of that name exists already, or `~/jupyter_ws` could not be renamed, for example because it is a mount point. Nothing was erased, and the stopped services were started again. Check the log, then re-run. |
 | A service I turned off starts at boot | Both choices set the services back to the driver's defaults. Turn it off again with `racecar service disable <name>`. |
+| A lab dashboard no longer starts at boot | The driver's defaults leave every lab dashboard off. Turn one on again with `racecar service enable <name>`. |
+| The run was stopped with Ctrl-C in step 1 | Re-run the installer. A run stopped while the services were stopping leaves them stopped until the next reboot. A run stopped after the unit files went leaves the car with no neoracer services until a run completes. |
 | Setup fails partway | Re-run the installer. Every phase is idempotent, so a second run is safe. |
 | A single phase fails | Re-run just that phase, for example `bash ~/ros2_ws/src/neoracer_ros2_driver/scripts/setup_ml.sh`. The diagnostic names the script. |
 | `/dev/osrbot_*` warnings | Unplug and re-plug the device, or reboot. The rules are installed; only the symlinks are missing. |

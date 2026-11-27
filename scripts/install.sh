@@ -688,6 +688,13 @@ else
     WIPE_PATHS=("${WIPE_PATHS_CHOICE_2[@]}")
 fi
 
+# Choice 1 keeps the labs only on a car that has them. On a new card, the
+# driver setup installs the newest labs, and the summary says so.
+LABS_KEPT=false
+if [ "$REINSTALL_CHOICE" = 1 ] && [ -d "${JUPYTER_WS}/neoracer-os/labs" ]; then
+    LABS_KEPT=true
+fi
+
 # ============================================================================
 # Confirmation
 # ============================================================================
@@ -734,7 +741,8 @@ elif [ "$DRY_RUN" = true ]; then
     log "Confirmation skipped (--dry-run)."
 elif [ ! -t 0 ]; then
     echo -e "\e[1;31m[ERROR] No terminal available to confirm the erase.\e[0m"
-    log "Re-run with -y to confirm non-interactively."
+    log "Run it from a terminal to choose in the menu. Over ssh, connect with ssh -t."
+    log "Or re-run with -y, which reinstalls everything (choice 2) with no questions."
     log_silent "========== INSTALL LOG END (ABORTED: cannot confirm) =========="
     exit 1
 else
@@ -846,25 +854,45 @@ backup_jupyter_ws() {
 # Setup enables a core unit only when its unit file is new on that run, so the
 # core units start at boot again, and autonomy and the lab dashboards are
 # installed and not enabled. Each unit is disabled before its file goes, so no
-# boot link is left behind to start the reinstalled unit at boot. The vendor
+# boot link is left behind to start the reinstalled unit at boot. A unit file
+# that is a link to a missing file has nothing to disable, so it is only
+# removed. A boot link whose unit file is gone already is removed too, because
+# it would start the reinstalled unit of that name at boot. The vendor
 # jupyterlab.service and /etc/sudoers.d/neoracer are left alone.
 remove_unit_files() {
-    local unit svc found=0
+    local unit svc link found=0
     for unit in "$UNIT_DIR"/neoracer-*.service; do
         [ -e "$unit" ] || [ -L "$unit" ] || continue
         found=1
         svc=$(basename "$unit")
         if [ "$DRY_RUN" = true ]; then
-            log "  [dry-run] would disable ${svc}"
+            [ -e "$unit" ] && log "  [dry-run] would disable ${svc}"
             log "  [dry-run] would remove ${unit}"
             continue
         fi
-        log "  disabling ${svc}"
-        sudo systemctl disable "$svc" >>"$LOG_FILE" 2>&1 \
-            || log_silent "WARNING: Command exited with code $?: systemctl disable ${svc}"
+        if [ -e "$unit" ]; then
+            log "  disabling ${svc}"
+            sudo systemctl disable "$svc" >>"$LOG_FILE" 2>&1 \
+                || log_silent "WARNING: Command exited with code $?: systemctl disable ${svc}"
+        fi
         log "  removing ${unit}"
         sudo rm -f -- "$unit" >>"$LOG_FILE" 2>&1 \
             || log_silent "WARNING: Command exited with code $?: rm -f ${unit}"
+    done
+
+    # disable above removed the boot links of each unit that had a file. A
+    # link whose unit file is still there in a dry run is one disable removes.
+    for link in "$UNIT_DIR"/*.wants/neoracer-*.service "$UNIT_DIR"/*.requires/neoracer-*.service; do
+        [ -L "$link" ] || continue
+        [ -e "${UNIT_DIR}/$(basename "$link")" ] && continue
+        found=1
+        if [ "$DRY_RUN" = true ]; then
+            log "  [dry-run] would remove ${link}"
+            continue
+        fi
+        log "  removing ${link}"
+        sudo rm -f -- "$link" >>"$LOG_FILE" 2>&1 \
+            || log_silent "WARNING: Command exited with code $?: rm -f ${link}"
     done
     [ "$found" = 1 ] || return 0
 
@@ -1462,8 +1490,10 @@ echo -e "\e[1;36m======================== INSTALLATION SUMMARY =================
 echo -e "  Installer:        \e[1mv${INSTALLER_VERSION}\e[0m"
 echo -e "  Driver:           \e[1m${DRIVER_NAME} ${DRIVER_REV:-not cloned}\e[0m (was ${DRIVER_REV_BEFORE:-none})"
 echo -e "  Workspace:        \e[1m${WS_DIR}\e[0m"
-if [ "$REINSTALL_CHOICE" = 1 ]; then
+if [ "$LABS_KEPT" = true ]; then
     echo -e "  Labs:             \e[1mkept as they were. Run 'racecar update --labs' to refresh them.\e[0m"
+elif [ "$REINSTALL_CHOICE" = 1 ]; then
+    echo -e "  Labs:             \e[1mnone to keep. The driver setup installs the newest labs.\e[0m"
 else
     echo -e "  Backup:           \e[1m${SUMMARY_BACKUP}\e[0m"
     echo -e "                    Old backups stay until someone deletes them."
@@ -1477,8 +1507,10 @@ log_silent "======================== INSTALLATION SUMMARY ======================
 log_silent "  Installer:        v${INSTALLER_VERSION}"
 log_silent "  Driver:           ${DRIVER_NAME} ${DRIVER_REV:-not cloned} (was ${DRIVER_REV_BEFORE:-none})"
 log_silent "  Workspace:        ${WS_DIR}"
-if [ "$REINSTALL_CHOICE" = 1 ]; then
+if [ "$LABS_KEPT" = true ]; then
     log_silent "  Labs:             kept as they were. Run 'racecar update --labs' to refresh them."
+elif [ "$REINSTALL_CHOICE" = 1 ]; then
+    log_silent "  Labs:             none to keep. The driver setup installs the newest labs."
 else
     log_silent "  Backup:           ${SUMMARY_BACKUP}"
     log_silent "                    Old backups stay until someone deletes them."

@@ -513,6 +513,8 @@ def test_removal_guard_covers_home_and_root(script_source: str) -> None:
 def test_confirmation_required_without_a_terminal(script_source: str) -> None:
     assert 'elif [ ! -t 0 ]; then' in script_source
     assert "No terminal available to confirm the erase" in script_source
+    # -y is no longer only a confirmation: the message says what it erases.
+    assert "Or re-run with -y, which reinstalls everything (choice 2) with no questions." in script_source
 
 
 def test_repo_is_reachable_before_anything_is_erased(script_source: str) -> None:
@@ -749,6 +751,46 @@ def test_failed_backup_stops_before_the_erase(script_source: str) -> None:
     assert "exit 1" in failure
 
 
+def test_each_stopped_service_is_recorded_for_the_restart(script_source: str) -> None:
+    # restart_stopped_services starts only the units the stop loop recorded.
+    start = script_source.index("STOPPED_SERVICES=()\n")
+    loop = script_source[start : script_source.index("done < <(running_services)", start)]
+    assert loop.index('sudo systemctl stop "$svc"') < loop.index('STOPPED_SERVICES+=("$svc")')
+
+
+def test_backup_of_a_linked_jupyter_ws_moves_the_link(tmp_path: Path, script_source: str) -> None:
+    # A ~/jupyter_ws that is a link moves as a link. The folder it points to
+    # stays where it is, with the notebooks in it.
+    target = tmp_path / "elsewhere"
+    target.mkdir()
+    (target / "my_lab.ipynb").write_text("student work")
+    (tmp_path / "jupyter_ws").symlink_to(target)
+    result = run_function(
+        script_source, "backup_jupyter_ws", tmp_path,
+        'backup_jupyter_ws; echo "rc=$?"',
+    )
+    assert "rc=0" in result.stdout, result.stdout
+    backups = list(tmp_path.glob("jupyter_ws-backup-*"))
+    assert len(backups) == 1
+    assert backups[0].is_symlink()
+    assert os.readlink(backups[0]) == str(target)
+    assert (target / "my_lab.ipynb").read_text() == "student work"
+    assert not os.path.lexists(tmp_path / "jupyter_ws")
+
+
+def test_backup_moves_a_broken_jupyter_ws_link(tmp_path: Path, script_source: str) -> None:
+    # A link to a missing folder is moved too, so the driver setup can make a
+    # real ~/jupyter_ws in its place.
+    (tmp_path / "jupyter_ws").symlink_to(tmp_path / "gone")
+    result = run_function(
+        script_source, "backup_jupyter_ws", tmp_path,
+        'backup_jupyter_ws; echo "rc=$?"',
+    )
+    assert "rc=0" in result.stdout, result.stdout
+    assert not os.path.lexists(tmp_path / "jupyter_ws")
+    assert len(list(tmp_path.glob("jupyter_ws-backup-*"))) == 1
+
+
 def test_stopped_services_are_started_again(tmp_path: Path, script_source: str) -> None:
     result = run_function(
         script_source, "restart_stopped_services", tmp_path,
@@ -813,6 +855,49 @@ def test_unit_files_are_disabled_then_removed(tmp_path: Path, script_source: str
     assert not any("jupyterlab" in call for call in calls)
 
 
+def test_boot_links_without_a_unit_file_are_removed(tmp_path: Path, script_source: str) -> None:
+    # A boot link left after its unit file went would start the reinstalled
+    # unit of that name at boot. A unit file that is a link to a missing file
+    # has nothing to disable and is only removed.
+    units = _unit_dir(tmp_path)
+    wants = units / "multi-user.target.wants"
+    (wants / "neoracer-wallfollow.service").symlink_to(units / "neoracer-wallfollow.service")
+    (wants / "jupyterlab.service").symlink_to(units / "jupyterlab.service")
+    (units / "neoracer-eps.service").symlink_to(tmp_path / "gone" / "neoracer-eps.service")
+    result = run_function(
+        script_source, "remove_unit_files", tmp_path, "remove_unit_files",
+        setup=(
+            f"UNIT_DIR={shlex.quote(str(units))}\n"
+            'sudo() { echo "sudo $*" >> "$HOME/calls"; "$@"; }\n'
+            "systemctl() { :; }"
+        ),
+    )
+    assert result.returncode == 0, result.stderr
+    assert not os.path.lexists(wants / "neoracer-wallfollow.service")
+    assert not os.path.lexists(units / "neoracer-eps.service")
+    assert (wants / "jupyterlab.service").is_symlink()
+    calls = (tmp_path / "calls").read_text().splitlines()
+    assert f"sudo rm -f -- {wants}/neoracer-wallfollow.service" in calls
+    assert "sudo systemctl disable neoracer-eps.service" not in calls
+    assert calls[-1] == "sudo systemctl daemon-reload"
+
+
+def test_boot_links_of_installed_units_are_left_to_disable_in_a_dry_run(
+    tmp_path: Path, script_source: str
+) -> None:
+    units = _unit_dir(tmp_path)
+    wants = units / "multi-user.target.wants"
+    (wants / "neoracer-teleop.service").symlink_to(units / "neoracer-teleop.service")
+    (wants / "neoracer-wallfollow.service").symlink_to(units / "neoracer-wallfollow.service")
+    result = run_function(
+        script_source, "remove_unit_files", tmp_path, "remove_unit_files",
+        setup=f"DRY_RUN=true\nUNIT_DIR={shlex.quote(str(units))}",
+    )
+    assert f"[dry-run] would remove {wants}/neoracer-wallfollow.service" in result.stdout
+    assert f"would remove {wants}/neoracer-teleop.service" not in result.stdout
+    assert (wants / "neoracer-wallfollow.service").is_symlink()
+
+
 def test_no_unit_files_means_no_reload(tmp_path: Path, script_source: str) -> None:
     units = tmp_path / "systemd"
     units.mkdir()
@@ -873,12 +958,21 @@ def test_choice_2_runs_setup_unchanged(sandbox: tuple[Path, Path]) -> None:
 
 def test_summary_and_check_for_choice_1(sandbox: tuple[Path, Path]) -> None:
     home, script = sandbox
+    (home / "jupyter_ws" / "neoracer-os" / "labs").mkdir(parents=True)
     out = plain(run_installer_on_a_terminal(home, script, "1\n", "--dry-run").stdout)
     assert "Labs:             kept as they were. Run 'racecar update --labs' to refresh them." in out
     assert f"[PASS] {home}/jupyter_ws present" in out
     assert "recreated by the driver setup" not in out
     log = newest_log(script)
     assert "Labs:             kept as they were." in log
+
+
+def test_summary_for_choice_1_on_a_car_with_no_labs(sandbox: tuple[Path, Path]) -> None:
+    # A new card has no labs to keep, so the summary does not say they were kept.
+    home, script = sandbox
+    out = plain(run_installer_on_a_terminal(home, script, "1\n", "--dry-run").stdout)
+    assert "Labs:             none to keep. The driver setup installs the newest labs." in out
+    assert "kept as they were" not in out
 
 
 def test_summary_and_check_for_choice_2(sandbox: tuple[Path, Path]) -> None:

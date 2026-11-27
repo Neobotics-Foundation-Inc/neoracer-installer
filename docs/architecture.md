@@ -80,7 +80,8 @@ reboot notice -> exit 0 or 1
   when it is a terminal. `-y` replaces both.
 - **systemd.** Stops every running `neoracer-*` unit and the vendor
   `jupyterlab.service` before removal. Then disables each installed
-  `/etc/systemd/system/neoracer-*.service`, removes its unit file and runs
+  `/etc/systemd/system/neoracer-*.service`, removes its unit file, removes any
+  `neoracer-*` boot link left without its unit file and runs
   `systemctl daemon-reload`, so the driver setup installs every unit as new.
   Leaves `jupyterlab.service` and `/etc/sudoers.d/neoracer` alone. Reads the
   enable state of the fourteen 0.9.0 units during diagnostics. Starts units

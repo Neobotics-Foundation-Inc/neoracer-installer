@@ -75,10 +75,12 @@ For Jetson Orin Nano and Orin NX running JetPack 6.x (Ubuntu 22.04) with ROS2 Hu
       Choice 1, or Enter, keeps the notebooks and labs in `~/jupyter_ws` as
       they are. Choice 2 moves `~/jupyter_ws` to a dated folder such as
       `~/jupyter_ws-backup-20261127-141500` and installs the newest labs. The
-      backup stays until you delete it.
+      backup stays until you delete it. JupyterLab shows only `~/jupyter_ws`,
+      so copy a notebook back from the backup in a terminal.
     - Review the directories it lists and type `yes` to confirm the erase.
       Both choices set the car's services back to their defaults. A service
-      you turned off starts at boot again.
+      you turned off starts at boot again, and a lab dashboard you set to
+      start at boot stays off until you enable it again.
     - Wait 30 to 60 minutes while the driver, ROS2, and the GPU stack install
     - If the ROS2 Humble install stops with `Unable to fetch some archives`,
       the Jetson's package lists are out of date. Run `sudo apt-get update`,
@@ -124,8 +126,10 @@ to, are both shown before you confirm the erase, and again once the driver is in
 place.
 
 The summary at the end follows your choice. After choice 1 it reads
-`Labs: kept as they were. Run 'racecar update --labs' to refresh them.` After
-choice 2 it names the backup folder.
+`Labs: kept as they were. Run 'racecar update --labs' to refresh them.` On a
+car with no labs yet, it reads
+`Labs: none to keep. The driver setup installs the newest labs.` After choice 2
+it names the backup folder.
 
 After the reboot you have a built `~/ros2_ws`, the `racecar` command in every new
 terminal, JupyterLab on port 8888, the apps page on port 8080, the map viewer on
