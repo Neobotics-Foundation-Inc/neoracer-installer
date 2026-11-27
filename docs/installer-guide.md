@@ -10,6 +10,7 @@ Target hardware: Jetson Orin Nano, JetPack 6.x / Ubuntu 22.04 (Jammy), ROS2 Humb
 - [Overview](#overview)
 - [Prerequisites](#prerequisites)
 - [Usage](#usage)
+  - [Reinstall choice](#reinstall-choice)
 - [Options](#options)
 - [Run steps](#run-steps)
   - [Driver version reporting](#driver-version-reporting)
@@ -27,10 +28,12 @@ Target hardware: Jetson Orin Nano, JetPack 6.x / Ubuntu 22.04 (Jammy), ROS2 Humb
 
 A car arriving from a classroom, a shipment, or a half-finished install is in an
 unknown software state. This installer removes that state instead of patching
-it: three car folders (`~/jupyter_ws`, `~/ros2_ws`, `~/logs`) are deleted,
-recreated empty, and rebuilt from the driver repository. The result is the same
-on every car regardless of what was on it before. The car's data root
-`~/neoracer_data` and its profile `~/.config/racecar` are kept.
+it: the car folders `~/ros2_ws` and `~/logs` are deleted, recreated empty, and
+rebuilt from the driver repository. The result is the same on every car
+regardless of what was on it before. Before the erase, the operator chooses
+whether `~/jupyter_ws`, the students' notebooks and labs, is kept (choice 1) or
+moved to a dated backup and rebuilt too (choice 2). The car's data root
+`~/neoracer_data` and its profile `~/.config/racecar` are kept in both choices.
 
 A car that already runs the driver does not need the installer. `racecar update`
 pulls the latest driver, runs the same setup, and keeps the lab dashboard tuning
@@ -65,9 +68,9 @@ git clone https://github.com/Neobotics-Foundation-Inc/neoracer-installer.git
 bash neoracer-installer/scripts/install.sh
 ```
 
-The installer lists the directories it is about to erase and waits for you to
-type `yes`. It then asks for your sudo password once and keeps that
-authorization for the rest of the run.
+You enter your sudo password once, and the run keeps that authorization to its
+end. The reinstall menu comes next, then the list of directories the chosen run
+erases. The erase starts only after you type `yes`.
 
 Rehearse a run without touching anything:
 
@@ -83,12 +86,45 @@ git -C ~/neoracer-installer pull
 bash ~/neoracer-installer/scripts/install.sh
 ```
 
+### Reinstall choice
+
+Before the warning, a run with a terminal shows this menu:
+
+```
+What should this run reinstall?
+  1) The driver and the student library. ~/jupyter_ws remains.
+  2) Everything. ~/jupyter_ws is erased too, and the newest labs are installed.
+Choose 1 or 2 [1]:
+```
+
+Enter picks 1. Any other answer than `1`, `2` or an empty line shows the prompt
+again. The log records each answer and the choice.
+
+| | Choice 1 | Choice 2 |
+| --- | --- | --- |
+| Erased | `~/ros2_ws`, `~/logs` | `~/jupyter_ws`, `~/ros2_ws`, `~/logs` |
+| `~/jupyter_ws` | Kept as it is, with the notebooks and labs | Moved to `~/jupyter_ws-backup-YYYYMMDD-HHMMSS`, then rebuilt by the driver setup |
+| Labs | Kept as they were. `racecar update --labs` refreshes them later. | The newest labs from the driver setup |
+| Services | Back to the driver's defaults | Back to the driver's defaults |
+
+In both choices the services go back to their defaults: the core units start at
+boot, and autonomy and the lab dashboards do not. A service you turned off
+starts at boot again. `racecar service disable <name>` turns it off again. A lab
+dashboard you set to start at boot stays off until
+`racecar service enable <name>` turns it on again.
+
+Choice 1 keeps the labs through the driver setup's `RACECAR_LABS_REFRESH`
+setting, which the driver 0.9.0 release reads. A driver from before that setting,
+cloned with `DRIVER_REF`, copies the shipped labs over the kept ones.
+
+`-y` means choice 2 with no questions. Choice 1 is offered only in the menu.
+
 ## Options
 
 | Option | Effect |
 | ------ | ------ |
-| `-y`, `--yes` | Skip the confirmation prompt. Required when running without a terminal. |
-| `--dry-run` | Print every action; erase nothing, clone nothing, install nothing. Diagnostics still run and describe the car as it is now. |
+| `-y`, `--yes` | Reinstall everything (choice 2) with no questions. The menu and the confirmation prompt are skipped. Required when running without a terminal. |
+| `--dry-run` | Print every action; erase nothing, clone nothing, install nothing. Diagnostics still run and describe the car as it is now. With a terminal and no `-y`, the menu is shown and the plan follows the choice. Without a terminal, or with `-y`, the plan is choice 2. |
 | `-h`, `--help` | Print usage and exit. |
 
 Exit status is 0 when every diagnostic passes, 1 when any fails or the run is
@@ -103,18 +139,36 @@ Environment variables:
 
 ## Run steps
 
-1. **Removal.** `~/jupyter_ws`, `~/ros2_ws`, `~/logs`. Every running
-   `neoracer-*` unit and the vendor `jupyterlab.service` are stopped first so
-   removal does not race a running node. Each path is removed on its own and
-   only if it resolves inside `$HOME`. `~/neoracer_data`, `~/.config/racecar`
-   and `~/osracer_ws` are not touched.
-2. **Folder creation.** `~/ros2_ws/src`, `~/logs`. `~/jupyter_ws` is recreated
-   later by the driver's JupyterLab phase.
+1. **Removal.** This step runs in four parts.
+   - Every running `neoracer-*` unit and the vendor `jupyterlab.service` are
+     stopped, so removal does not race a running node.
+   - In choice 2, `~/jupyter_ws` is moved to
+     `~/jupyter_ws-backup-YYYYMMDD-HHMMSS` beside it. The move is a rename on
+     the same disk, so it completes in full or changes nothing. A backup name
+     that exists already stops the backup, so a backup never lands inside an
+     older one. A failed backup ends the run before anything is erased, and
+     the stopped units are started again. A missing `~/jupyter_ws` needs no
+     backup. When `~/jupyter_ws` is a link, the link moves, and the folder it
+     points to stays where it is.
+   - Each installed `/etc/systemd/system/neoracer-*.service` is disabled and
+     its unit file removed. A `neoracer-*` boot link left without its unit
+     file is removed too. Then `systemctl daemon-reload` runs, all through
+     sudo. `jupyterlab.service` and `/etc/sudoers.d/neoracer` are left alone.
+   - `~/ros2_ws` and `~/logs` are removed. Each path is removed on its own and
+     only if it resolves inside `$HOME`. `~/neoracer_data`, `~/.config/racecar`
+     and `~/osracer_ws` are not touched, and neither is `~/jupyter_ws` in
+     choice 1.
+2. **Folder creation.** `~/ros2_ws/src`, `~/logs`. In choice 2, `~/jupyter_ws`
+   is recreated later by the driver's JupyterLab phase.
 3. **Driver clone and setup.** Clone the driver into `~/ros2_ws/src` and run
    `neoracer_ros2_driver/scripts/setup_all.sh`, whose eight phases are ROS2
    Humble, dev tools, user environment, udev rules, workspace build (followed
    by the move of per-car files into the car profile), GPU stack, JupyterLab
    with the student library, and systemd services. This is the long step.
+   Choice 1 runs the setup with `RACECAR_LABS_REFRESH=0`, so a value exported
+   in the shell cannot refresh the kept labs. The setup installs every unit as
+   new, so it enables the core units at boot and leaves autonomy and the lab
+   dashboards off.
 
 Preflight checks run before step 1: not root, the `racecar` account with home
 `/home/racecar`, the presence of `git` and `curl`, a reachability probe of the
@@ -160,8 +214,8 @@ Once the driver setup returns, the installer verifies each component, grouped by
 the step and driver phase that installs it, so a failure names the script to
 re-run:
 
-- Workspace layout: `~/ros2_ws/src` and `~/logs` exist, and the driver setup
-  recreated `~/jupyter_ws`.
+- Workspace layout: `~/ros2_ws/src` and `~/logs` exist. `~/jupyter_ws` is
+  present (choice 1) or was recreated by the driver setup (choice 2).
 - Driver checkout: the clone is present, carries `setup_all.sh`, landed on the
   revision preflight advertised, and its `package.xml` version shares the
   installer's major.minor (installer 0.9.x for driver 0.9.x).
@@ -203,9 +257,10 @@ Every run writes one timestamped file to `neoracer-installer/logs/`:
 logs/install_2026-08-10_14-32-07.log
 ```
 
-The file holds every command the run executed and its output, each removal and
-its resolved path, all diagnostic verdicts, the summary, and a full system-state
-snapshot taken before and after the run. Nothing is rotated or overwritten, so a
+The file holds every command the run executed and its output, each menu answer
+and the reinstall choice, the backup path, each removal and its resolved path,
+all diagnostic verdicts, the summary, and a full system-state snapshot taken
+before and after the run. Nothing is rotated or overwritten, so a
 car carries the history of every install it has had. Send this file along with
 any bug report.
 
@@ -265,16 +320,24 @@ leaves the car unable to open its serial devices.
 
 ## Data loss
 
-Step 1 deletes student notebooks in `~/jupyter_ws`, the driver checkout in
-`~/ros2_ws` with the tuning saved inside old lab dashboard checkouts, and
-runtime logs in `~/logs`. Copy anything worth keeping off the car before
-starting. The installer prints the size of each folder at the confirmation
-prompt.
+In both choices, step 1 deletes the driver checkout in `~/ros2_ws` with the
+tuning saved inside old lab dashboard checkouts, and the runtime logs in
+`~/logs`. Copy anything worth keeping off the car before starting. The
+installer prints the size of each folder at the confirmation prompt.
+
+Choice 1 keeps `~/jupyter_ws` as it is. Choice 2 moves it to
+`~/jupyter_ws-backup-YYYYMMDD-HHMMSS` before the erase, and the summary names
+the folder. Old backups stay until someone deletes them, so delete one when it
+is no longer needed. JupyterLab shows only `~/jupyter_ws`, so copy a notebook
+back from a backup in a terminal, for example
+`cp ~/jupyter_ws-backup-20261127-141500/my_lab.ipynb ~/jupyter_ws/`. The
+`data` and `maps` entries in a backup are links into `~/neoracer_data`.
+`rm -rf` on the backup removes the links and leaves the data root as it is.
 
 Kept: `~/neoracer_data` (bags, maps, datasets, dashboard logs),
 `~/.config/racecar` (the car profile) and `~/osracer_ws` (the vendor
-workspace). A car that already runs the driver keeps everything, tuning
-included, with `racecar update`.
+workspace). A car that already runs the driver keeps everything, tuning and
+service settings included, with `racecar update`.
 
 ## Troubleshooting
 
@@ -285,7 +348,12 @@ included, with `racecar update`.
 | `This installer runs as the racecar user` | Started from another account. The driver's services and sudo rules are written for `racecar`. Log in as `racecar` and re-run; nothing was erased. |
 | `No branch or tag named ...` | `DRIVER_REF` names something the driver repository does not have. Check the spelling, or unset it for the default branch. Nothing was erased. |
 | `driver X does not match installer Y` | The driver on the default branch is another release than this installer is written for. Update the installer clone (`git -C ~/neoracer-installer pull`), or set `DRIVER_REF` to the matching release. |
-| `No terminal available to confirm the erase` | Started from a script or an ssh command without a tty. Re-run with `-y`. |
+| `No terminal available to confirm the erase` | Started from a script or an ssh command without a tty. Re-run with `-y`, which reinstalls everything (choice 2), or from a terminal to see the menu. |
+| `No choice was made` | The menu's input ended, for example with Ctrl-D. Nothing was erased. Re-run and choose 1 or 2. |
+| `The backup of /home/racecar/jupyter_ws failed` | The move to the dated backup folder failed. The line above it names the folder. A folder of that name exists already, or `~/jupyter_ws` could not be renamed, for example because it is a mount point. Nothing was erased, and the stopped services were started again. Check the log, then re-run. |
+| A service I turned off starts at boot | Both choices set the services back to the driver's defaults. Turn it off again with `racecar service disable <name>`. |
+| A lab dashboard no longer starts at boot | The driver's defaults leave every lab dashboard off. Turn one on again with `racecar service enable <name>`. |
+| The run was stopped with Ctrl-C in step 1 | Re-run the installer. A run stopped while the services were stopping leaves them stopped until the next reboot. A run stopped after the unit files went leaves the car with no neoracer services until a run completes. |
 | Setup fails partway | Re-run the installer. Every phase is idempotent, so a second run is safe. |
 | A single phase fails | Re-run just that phase, for example `bash ~/ros2_ws/src/neoracer_ros2_driver/scripts/setup_ml.sh`. The diagnostic names the script. |
 | `/dev/osrbot_*` warnings | Unplug and re-plug the device, or reboot. The rules are installed; only the symlinks are missing. |
@@ -310,8 +378,8 @@ See [architecture.md](architecture.md).
 Latest entries; full history in [changelog.md](changelog.md).
 
 ### [0.9.0] - 2026-11-26
-- Added: preflight check for the `racecar` account before the erase; `DRIVER_REF` and `DRIVER_URL`; diagnostics for everything driver 0.9.0 installs and for the driver release matching the installer; snapshots of all fourteen units and the driver's package version; a confirmation prompt that names what is kept and points to `racecar update`.
-- Changed: the version follows the driver release (0.9.0 for driver 0.9.0); the docs describe the 0.9.0 car.
+- Added: preflight check for the `racecar` account before the erase; `DRIVER_REF` and `DRIVER_URL`; diagnostics for everything driver 0.9.0 installs and for the driver release matching the installer; snapshots of all fourteen units and the driver's package version; a confirmation prompt that names what is kept and points to `racecar update`; a reinstall menu, where choice 1 keeps `~/jupyter_ws` and choice 2 moves it to a dated backup before the erase; the neoracer unit files are disabled and removed before the erase, so the services go back to their defaults.
+- Changed: the version follows the driver release (0.9.0 for driver 0.9.0); the docs describe the 0.9.0 car; the warning lists only what the chosen run erases; `-y` means choice 2 with no questions.
 - Removed: `~/data` is no longer erased or created.
 
 ### [0.2.2] - 2026-10-26

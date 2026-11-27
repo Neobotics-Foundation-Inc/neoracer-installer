@@ -3,14 +3,18 @@
 The installer erases the car and installs ROS2, so the suite never runs it for
 real. Behavior is covered through --dry-run against a sandbox $HOME; the guards
 that can only fire on a real run are covered by reading the script source.
+The reinstall menu reads a terminal, so those runs put stdin on a pseudo-terminal.
 """
 
 from __future__ import annotations
 
 import os
+import pty
 import re
+import shlex
 import shutil
 import subprocess
+import termios
 from pathlib import Path
 
 import pytest
@@ -44,6 +48,8 @@ def sandbox(tmp_path: Path) -> tuple[Path, Path]:
 def run_installer(
     home: Path, script: Path, *args: str, extra_env: dict[str, str] | None = None
 ) -> subprocess.CompletedProcess[str]:
+    # stdin is never a terminal here, even when pytest runs in one, so the
+    # reinstall menu is not shown.
     env = dict(os.environ)
     env["HOME"] = str(home)
     env.update(extra_env or {})
@@ -51,9 +57,83 @@ def run_installer(
         ["bash", str(script), *args],
         env=env,
         cwd=str(home),
+        stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
         timeout=300,
+    )
+
+
+def run_installer_on_a_terminal(
+    home: Path, script: Path, answers: str, *args: str, extra_env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
+    """Run the installer with stdin on a pseudo-terminal and type the answers.
+
+    [ -t 0 ] is true on the terminal, so the reinstall menu is shown. stdout
+    and stderr stay pipes. Echo is off, so the typed answers are not repeated.
+    """
+    env = dict(os.environ)
+    env["HOME"] = str(home)
+    env.update(extra_env or {})
+    controller, terminal = pty.openpty()
+    attrs = termios.tcgetattr(terminal)
+    attrs[3] &= ~termios.ECHO
+    termios.tcsetattr(terminal, termios.TCSANOW, attrs)
+    try:
+        proc = subprocess.Popen(
+            ["bash", str(script), *args],
+            env=env,
+            cwd=str(home),
+            stdin=terminal,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    finally:
+        os.close(terminal)
+    try:
+        os.write(controller, answers.encode())
+        out, err = proc.communicate(timeout=300)
+    finally:
+        os.close(controller)
+    return subprocess.CompletedProcess(proc.args, proc.returncode, out, err)
+
+
+def newest_log(script: Path) -> str:
+    return max((script.parent.parent / "logs").glob("install_*.log")).read_text()
+
+
+def plain(out: str) -> str:
+    """The output without its colour codes."""
+    return re.sub(r"\x1b\[[0-9;]*m", "", out)
+
+
+def run_function(
+    script_source: str, name: str, home: Path, call: str, setup: str = ""
+) -> subprocess.CompletedProcess[str]:
+    """Run one function of install.sh on its own, against a temp $HOME.
+
+    The function's text is cut from the script source. log and log_silent are
+    replaced by plain writes, and setup can define more stand-ins, such as
+    sudo or date, before the call.
+    """
+    start = script_source.index(f"\n{name}() {{\n") + 1
+    end = script_source.index("\n}\n", start) + 3
+    prelude = (
+        'log() { echo "$1"; }\n'
+        'log_silent() { echo "$1" >> "$LOG_FILE"; }\n'
+        f"HOME={shlex.quote(str(home))}\n"
+        'LOG_FILE="$HOME/function.log"\n'
+        'JUPYTER_WS="$HOME/jupyter_ws"\n'
+        "DRY_RUN=false\n"
+    )
+    return subprocess.run(
+        ["bash", "-c", prelude + setup + "\n" + script_source[start:end] + call],
+        cwd=str(home),
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=60,
     )
 
 
@@ -117,7 +197,9 @@ def test_no_account_link_step(sandbox: tuple[Path, Path]) -> None:
 def test_dry_run_plans_the_documented_commands(sandbox: tuple[Path, Path]) -> None:
     home, script = sandbox
     out = run_installer(home, script, "--dry-run", "--yes").stdout
-    assert f"would remove {home}/jupyter_ws" in out
+    assert f"would move {home}/jupyter_ws to {home}/jupyter_ws-backup-" in out
+    assert f"would remove {home}/ros2_ws" in out
+    assert f"would remove {home}/logs" in out
     assert f"mkdir -p {home}/ros2_ws/src" in out
     assert f"mkdir -p {home}/logs" in out
     assert "git clone https://github.com/Neobotics-Foundation-Inc/neoracer_ros2_driver.git" in out
@@ -431,6 +513,8 @@ def test_removal_guard_covers_home_and_root(script_source: str) -> None:
 def test_confirmation_required_without_a_terminal(script_source: str) -> None:
     assert 'elif [ ! -t 0 ]; then' in script_source
     assert "No terminal available to confirm the erase" in script_source
+    # -y is no longer only a confirmation: the message says what it erases.
+    assert "Or re-run with -y, which reinstalls everything (choice 2) with no questions." in script_source
 
 
 def test_repo_is_reachable_before_anything_is_erased(script_source: str) -> None:
@@ -447,3 +531,463 @@ def test_every_running_service_is_stopped_before_removal(script_source: str) -> 
     assert removal < stop < wipe
     # A unit waiting to restart after a crash is "activating"; it must be stopped too.
     assert "--state=active,activating" in script_source
+
+
+MENU = (
+    "What should this run reinstall?\n"
+    "  1) The driver and the student library. ~/jupyter_ws remains.\n"
+    "  2) Everything. ~/jupyter_ws is erased too, and the newest labs are installed.\n"
+    "Choose 1 or 2 [1]: "
+)
+
+
+def warning_block(out: str) -> str:
+    start = out.index("[WARNING] The following directories will be erased:")
+    return out[start : out.index("racecar update", start)]
+
+
+def test_menu_text_is_exact(sandbox: tuple[Path, Path]) -> None:
+    home, script = sandbox
+    out = run_installer_on_a_terminal(home, script, "1\n", "--dry-run").stdout
+    assert MENU in out
+    # The menu comes before the warning, so the warning can list the chosen run.
+    assert out.index(MENU) < out.index("[WARNING] The following directories will be erased:")
+
+
+@pytest.mark.parametrize(
+    ("answers", "choice", "prompts"),
+    [
+        ("1\n", "1", 1),
+        ("2\n", "2", 1),
+        ("\n", "1", 1),
+        ("x\n1\n", "1", 2),
+    ],
+    ids=["one", "two", "enter", "invalid-then-one"],
+)
+def test_menu_answers(sandbox: tuple[Path, Path], answers: str, choice: str, prompts: int) -> None:
+    # Enter picks 1. Any other answer than 1, 2 or empty shows the prompt again.
+    home, script = sandbox
+    result = run_installer_on_a_terminal(home, script, answers, "--dry-run")
+    assert result.returncode == 0, result.stdout
+    assert result.stdout.count("Choose 1 or 2 [1]: ") == prompts
+    assert f"Reinstall choice: {choice} (menu)" in newest_log(script)
+
+
+def test_menu_closed_without_an_answer_stops_the_run(sandbox: tuple[Path, Path]) -> None:
+    # Ctrl-D at the prompt ends stdin. The run stops before the warning.
+    home, script = sandbox
+    result = run_installer_on_a_terminal(home, script, "\x04", "--dry-run")
+    assert result.returncode == 1
+    assert "No choice was made. Nothing has been removed." in result.stdout
+    assert "[WARNING]" not in result.stdout
+
+
+def test_yes_skips_the_menu_and_plans_choice_2(sandbox: tuple[Path, Path]) -> None:
+    home, script = sandbox
+    out = run_installer(home, script, "--dry-run", "--yes").stdout
+    assert "What should this run reinstall?" not in out
+    assert "This run reinstalls everything (choice 2). --yes skips the menu." in out
+    assert "Reinstall choice: 2 (set by --yes)" in newest_log(script)
+    assert f"{home}/jupyter_ws  (" in warning_block(out)
+    # The folder is moved, not erased, and its line in the list says so.
+    jupyter_line = next(
+        line for line in warning_block(out).splitlines() if f"{home}/jupyter_ws  (" in line
+    )
+    assert jupyter_line.endswith("(moved to a dated backup first)")
+    ros2_line = next(
+        line for line in warning_block(out).splitlines() if f"{home}/ros2_ws  (" in line
+    )
+    assert "moved to a dated backup" not in ros2_line
+
+
+def test_dry_run_without_a_terminal_plans_choice_2(sandbox: tuple[Path, Path]) -> None:
+    home, script = sandbox
+    result = run_installer(home, script, "--dry-run")
+    assert result.returncode == 0, result.stdout
+    assert "What should this run reinstall?" not in result.stdout
+    assert "there is no terminal for the menu, so the run plans choice 2" in result.stdout
+    assert "Reinstall choice: 2 (no terminal)" in newest_log(script)
+    assert f"{home}/jupyter_ws  (" in warning_block(result.stdout)
+
+
+def test_warning_for_choice_1_keeps_jupyter_ws(sandbox: tuple[Path, Path]) -> None:
+    home, script = sandbox
+    out = run_installer_on_a_terminal(home, script, "1\n", "--dry-run").stdout
+    warning = warning_block(out)
+    assert f"{home}/ros2_ws  (" in warning
+    assert f"{home}/logs  (" in warning
+    assert f"{home}/jupyter_ws  (" not in warning
+    assert "notebooks in" not in warning
+    assert "Kept: ~/jupyter_ws (notebooks and labs)" in warning
+    assert "lab dashboard checkouts under ~/ros2_ws." in warning
+
+
+def test_warning_for_choice_2_lists_every_folder(sandbox: tuple[Path, Path]) -> None:
+    home, script = sandbox
+    out = run_installer_on_a_terminal(home, script, "2\n", "--dry-run").stdout
+    warning = warning_block(out)
+    for name in ("jupyter_ws", "ros2_ws", "logs"):
+        assert f"{home}/{name}  (" in warning
+    assert f"Kept: {home}/neoracer_data" in warning
+    assert "Kept: ~/jupyter_ws" not in warning
+
+
+def test_choice_1_leaves_jupyter_ws_out_of_the_erase(sandbox: tuple[Path, Path]) -> None:
+    home, script = sandbox
+    out = run_installer_on_a_terminal(home, script, "1\n", "--dry-run").stdout
+    assert f"would remove {home}/jupyter_ws" not in out
+    assert f"would remove {home}/ros2_ws" in out
+    assert f"would remove {home}/logs" in out
+
+
+def test_no_terminal_without_yes_stops_before_anything_changes(script_source: str) -> None:
+    # The menu reads a terminal only. With no terminal and no -y, the
+    # confirmation stops the run before the first step changes anything.
+    menu = script_source.index('elif [ -t 0 ]; then\n    log ""\n    log "What should this run reinstall?"')
+    warning = script_source.index('log "[WARNING] The following directories will be erased:"')
+    stop = script_source.index("No terminal available to confirm the erase")
+    removal = script_source.index("[1/3] Removing existing systems and code")
+    assert menu < warning < stop < removal
+    assert "exit 1" in script_source[stop:removal]
+
+
+BACKUP_NAME = re.compile(r"jupyter_ws-backup-\d{8}-\d{6}")
+
+
+def test_yes_plans_choice_2_with_the_backup(sandbox: tuple[Path, Path]) -> None:
+    # -y keeps its old meaning, everything, and now moves ~/jupyter_ws to a
+    # dated backup first. The erase then skips the moved folder.
+    home, script = sandbox
+    out = run_installer(home, script, "--dry-run", "--yes").stdout
+    planned = re.search(rf"would move {re.escape(str(home))}/jupyter_ws to {re.escape(str(home))}/({BACKUP_NAME.pattern})$", out, re.MULTILINE)
+    assert planned, out
+    assert f"would remove {home}/jupyter_ws" not in out
+    assert (home / "jupyter_ws").is_dir()
+    assert not list(home.glob("jupyter_ws-backup-*"))
+    assert f"Backup:           {home}/{planned.group(1)} (dry run, not made)" in plain(out)
+    assert "Old backups stay until someone deletes them." in out
+
+
+def test_warning_for_choice_2_says_where_the_backup_goes(sandbox: tuple[Path, Path]) -> None:
+    home, script = sandbox
+    warning = warning_block(run_installer(home, script, "--dry-run", "--yes").stdout)
+    assert "Anything you saved in ~/ros2_ws or ~/logs is gone for good" in warning
+    assert "~/jupyter_ws is moved to ~/jupyter_ws-backup-YYYYMMDD-HHMMSS before" in warning
+    assert "notebooks in" not in warning
+
+
+def test_choice_1_makes_no_backup(sandbox: tuple[Path, Path]) -> None:
+    home, script = sandbox
+    out = run_installer_on_a_terminal(home, script, "1\n", "--dry-run").stdout
+    assert "would move" not in out
+    assert "jupyter_ws-backup-" not in out
+    assert "Backup:" not in out
+
+
+def test_backup_moves_jupyter_ws_beside_itself(tmp_path: Path, script_source: str) -> None:
+    (tmp_path / "jupyter_ws" / "neoracer-os" / "labs").mkdir(parents=True)
+    (tmp_path / "jupyter_ws" / "my_lab.ipynb").write_text("student work")
+    result = run_function(
+        script_source, "backup_jupyter_ws", tmp_path,
+        'backup_jupyter_ws; echo "rc=$?"; echo "backup=$JUPYTER_BACKUP"',
+    )
+    assert "rc=0" in result.stdout, result.stdout
+    backups = list(tmp_path.glob("jupyter_ws-backup-*"))
+    assert len(backups) == 1
+    assert BACKUP_NAME.fullmatch(backups[0].name)
+    assert f"backup={backups[0]}" in result.stdout
+    assert f"moved {tmp_path}/jupyter_ws to {backups[0]}" in result.stdout
+    # The folder itself moved: its contents sit at the top of the backup.
+    assert (backups[0] / "my_lab.ipynb").read_text() == "student work"
+    assert (backups[0] / "neoracer-os" / "labs").is_dir()
+    assert not (tmp_path / "jupyter_ws").exists()
+
+
+def test_backup_never_reuses_an_existing_folder(tmp_path: Path, script_source: str) -> None:
+    # A backup name that exists already stops the backup. Nothing moves, so the
+    # new backup never lands inside the older one.
+    (tmp_path / "jupyter_ws").mkdir()
+    (tmp_path / "jupyter_ws" / "my_lab.ipynb").write_text("student work")
+    older = tmp_path / "jupyter_ws-backup-20261127-141500"
+    older.mkdir()
+    (older / "old.ipynb").write_text("older work")
+    result = run_function(
+        script_source, "backup_jupyter_ws", tmp_path,
+        'backup_jupyter_ws; echo "rc=$?"; echo "backup=$JUPYTER_BACKUP"',
+        setup="date() { echo 20261127-141500; }",
+    )
+    assert "rc=1" in result.stdout, result.stdout
+    assert "backup=\n" in result.stdout
+    assert f"{older} exists already" in result.stdout
+    assert sorted(p.name for p in older.iterdir()) == ["old.ipynb"]
+    assert (tmp_path / "jupyter_ws" / "my_lab.ipynb").read_text() == "student work"
+
+
+def test_backup_is_not_needed_without_jupyter_ws(tmp_path: Path, script_source: str) -> None:
+    result = run_function(
+        script_source, "backup_jupyter_ws", tmp_path,
+        'backup_jupyter_ws; echo "rc=$?"; echo "backup=$JUPYTER_BACKUP"',
+    )
+    assert "rc=0" in result.stdout
+    assert "backup=\n" in result.stdout
+    assert "not present, so no backup is needed" in result.stdout
+    assert not list(tmp_path.glob("jupyter_ws-backup-*"))
+
+
+def test_backup_in_a_dry_run_moves_nothing(tmp_path: Path, script_source: str) -> None:
+    (tmp_path / "jupyter_ws").mkdir()
+    result = run_function(
+        script_source, "backup_jupyter_ws", tmp_path,
+        'backup_jupyter_ws; echo "rc=$?"', setup="DRY_RUN=true",
+    )
+    assert "rc=0" in result.stdout
+    assert f"would move {tmp_path}/jupyter_ws to {tmp_path}/jupyter_ws-backup-" in result.stdout
+    assert (tmp_path / "jupyter_ws").is_dir()
+    assert not list(tmp_path.glob("jupyter_ws-backup-*"))
+
+
+def test_failed_backup_stops_before_the_erase(script_source: str) -> None:
+    # The backup runs after the services stop and before any folder is erased.
+    # On failure the run starts the stopped units again and exits.
+    removal = script_source.index("[1/3] Removing existing systems and code")
+    stop = script_source.index("done < <(running_services)", removal)
+    backup = script_source.index('if [ "$REINSTALL_CHOICE" = 2 ] && ! backup_jupyter_ws; then', removal)
+    wipe = script_source.index('for path in "${WIPE_PATHS[@]}"', removal)
+    assert stop < backup < wipe
+    failure = script_source[backup:wipe]
+    assert "restart_stopped_services" in failure
+    assert "Nothing has been removed." in failure
+    assert "exit 1" in failure
+
+
+def test_each_stopped_service_is_recorded_for_the_restart(script_source: str) -> None:
+    # restart_stopped_services starts only the units the stop loop recorded.
+    start = script_source.index("STOPPED_SERVICES=()\n")
+    loop = script_source[start : script_source.index("done < <(running_services)", start)]
+    assert loop.index('sudo systemctl stop "$svc"') < loop.index('STOPPED_SERVICES+=("$svc")')
+
+
+def test_backup_of_a_linked_jupyter_ws_moves_the_link(tmp_path: Path, script_source: str) -> None:
+    # A ~/jupyter_ws that is a link moves as a link. The folder it points to
+    # stays where it is, with the notebooks in it.
+    target = tmp_path / "elsewhere"
+    target.mkdir()
+    (target / "my_lab.ipynb").write_text("student work")
+    (tmp_path / "jupyter_ws").symlink_to(target)
+    result = run_function(
+        script_source, "backup_jupyter_ws", tmp_path,
+        'backup_jupyter_ws; echo "rc=$?"',
+    )
+    assert "rc=0" in result.stdout, result.stdout
+    backups = list(tmp_path.glob("jupyter_ws-backup-*"))
+    assert len(backups) == 1
+    assert backups[0].is_symlink()
+    assert os.readlink(backups[0]) == str(target)
+    assert (target / "my_lab.ipynb").read_text() == "student work"
+    assert not os.path.lexists(tmp_path / "jupyter_ws")
+
+
+def test_backup_moves_a_broken_jupyter_ws_link(tmp_path: Path, script_source: str) -> None:
+    # A link to a missing folder is moved too, so the driver setup can make a
+    # real ~/jupyter_ws in its place.
+    (tmp_path / "jupyter_ws").symlink_to(tmp_path / "gone")
+    result = run_function(
+        script_source, "backup_jupyter_ws", tmp_path,
+        'backup_jupyter_ws; echo "rc=$?"',
+    )
+    assert "rc=0" in result.stdout, result.stdout
+    assert not os.path.lexists(tmp_path / "jupyter_ws")
+    assert len(list(tmp_path.glob("jupyter_ws-backup-*"))) == 1
+
+
+def test_stopped_services_are_started_again(tmp_path: Path, script_source: str) -> None:
+    result = run_function(
+        script_source, "restart_stopped_services", tmp_path,
+        "restart_stopped_services",
+        setup=(
+            'sudo() { echo "sudo $*"; }\n'
+            "STOPPED_SERVICES=(neoracer-teleop.service jupyterlab.service)"
+        ),
+    )
+    assert "starting neoracer-teleop.service again" in result.stdout
+    assert "starting jupyterlab.service again" in result.stdout
+    log = (tmp_path / "function.log").read_text()
+    assert "sudo systemctl start neoracer-teleop.service" in log
+    assert "sudo systemctl start jupyterlab.service" in log
+
+
+def _unit_dir(tmp_path: Path) -> Path:
+    units = tmp_path / "systemd"
+    (units / "multi-user.target.wants").mkdir(parents=True)
+    for name in ("neoracer-teleop.service", "neoracer-camlabel.service", "jupyterlab.service"):
+        (units / name).write_text("[Unit]\n")
+    return units
+
+
+def test_unit_files_plan_in_a_dry_run(tmp_path: Path, script_source: str) -> None:
+    units = _unit_dir(tmp_path)
+    result = run_function(
+        script_source, "remove_unit_files", tmp_path, "remove_unit_files",
+        setup=f"DRY_RUN=true\nUNIT_DIR={shlex.quote(str(units))}",
+    )
+    for svc in ("neoracer-camlabel.service", "neoracer-teleop.service"):
+        assert f"[dry-run] would disable {svc}" in result.stdout
+        assert f"[dry-run] would remove {units}/{svc}" in result.stdout
+        assert (units / svc).is_file()
+    assert "[dry-run] would run systemctl daemon-reload" in result.stdout
+    assert "jupyterlab" not in result.stdout
+
+
+def test_unit_files_are_disabled_then_removed(tmp_path: Path, script_source: str) -> None:
+    # Each neoracer unit is disabled before its file goes, then systemd reloads
+    # once. The vendor jupyterlab.service stays.
+    units = _unit_dir(tmp_path)
+    result = run_function(
+        script_source, "remove_unit_files", tmp_path, "remove_unit_files",
+        setup=(
+            f"UNIT_DIR={shlex.quote(str(units))}\n"
+            'sudo() { echo "sudo $*" >> "$HOME/calls"; "$@"; }\n'
+            "systemctl() { :; }"
+        ),
+    )
+    assert result.returncode == 0, result.stderr
+    assert not (units / "neoracer-teleop.service").exists()
+    assert not (units / "neoracer-camlabel.service").exists()
+    assert (units / "jupyterlab.service").is_file()
+    calls = (tmp_path / "calls").read_text().splitlines()
+    for svc in ("neoracer-camlabel.service", "neoracer-teleop.service"):
+        disable = calls.index(f"sudo systemctl disable {svc}")
+        remove = calls.index(f"sudo rm -f -- {units}/{svc}")
+        assert disable < remove
+    assert calls[-1] == "sudo systemctl daemon-reload"
+    assert calls.count("sudo systemctl daemon-reload") == 1
+    assert not any("jupyterlab" in call for call in calls)
+
+
+def test_boot_links_without_a_unit_file_are_removed(tmp_path: Path, script_source: str) -> None:
+    # A boot link left after its unit file went would start the reinstalled
+    # unit of that name at boot. A unit file that is a link to a missing file
+    # has nothing to disable and is only removed.
+    units = _unit_dir(tmp_path)
+    wants = units / "multi-user.target.wants"
+    (wants / "neoracer-wallfollow.service").symlink_to(units / "neoracer-wallfollow.service")
+    (wants / "jupyterlab.service").symlink_to(units / "jupyterlab.service")
+    (units / "neoracer-eps.service").symlink_to(tmp_path / "gone" / "neoracer-eps.service")
+    result = run_function(
+        script_source, "remove_unit_files", tmp_path, "remove_unit_files",
+        setup=(
+            f"UNIT_DIR={shlex.quote(str(units))}\n"
+            'sudo() { echo "sudo $*" >> "$HOME/calls"; "$@"; }\n'
+            "systemctl() { :; }"
+        ),
+    )
+    assert result.returncode == 0, result.stderr
+    assert not os.path.lexists(wants / "neoracer-wallfollow.service")
+    assert not os.path.lexists(units / "neoracer-eps.service")
+    assert (wants / "jupyterlab.service").is_symlink()
+    calls = (tmp_path / "calls").read_text().splitlines()
+    assert f"sudo rm -f -- {wants}/neoracer-wallfollow.service" in calls
+    assert "sudo systemctl disable neoracer-eps.service" not in calls
+    assert calls[-1] == "sudo systemctl daemon-reload"
+
+
+def test_boot_links_of_installed_units_are_left_to_disable_in_a_dry_run(
+    tmp_path: Path, script_source: str
+) -> None:
+    units = _unit_dir(tmp_path)
+    wants = units / "multi-user.target.wants"
+    (wants / "neoracer-teleop.service").symlink_to(units / "neoracer-teleop.service")
+    (wants / "neoracer-wallfollow.service").symlink_to(units / "neoracer-wallfollow.service")
+    result = run_function(
+        script_source, "remove_unit_files", tmp_path, "remove_unit_files",
+        setup=f"DRY_RUN=true\nUNIT_DIR={shlex.quote(str(units))}",
+    )
+    assert f"[dry-run] would remove {wants}/neoracer-wallfollow.service" in result.stdout
+    assert f"would remove {wants}/neoracer-teleop.service" not in result.stdout
+    assert (wants / "neoracer-wallfollow.service").is_symlink()
+
+
+def test_no_unit_files_means_no_reload(tmp_path: Path, script_source: str) -> None:
+    units = tmp_path / "systemd"
+    units.mkdir()
+    result = run_function(
+        script_source, "remove_unit_files", tmp_path, "remove_unit_files",
+        setup=(
+            f"UNIT_DIR={shlex.quote(str(units))}\n"
+            'sudo() { echo "sudo $*" >> "$HOME/calls"; }'
+        ),
+    )
+    assert result.returncode == 0
+    assert not (tmp_path / "calls").exists()
+
+
+def test_unit_files_go_after_the_backup_and_before_the_erase(script_source: str) -> None:
+    removal = script_source.index("[1/3] Removing existing systems and code")
+    backup = script_source.index('if [ "$REINSTALL_CHOICE" = 2 ] && ! backup_jupyter_ws; then', removal)
+    units = script_source.index("    remove_unit_files\n", removal)
+    wipe = script_source.index('for path in "${WIPE_PATHS[@]}"', removal)
+    assert backup < units < wipe
+    assert 'UNIT_DIR="/etc/systemd/system"' in script_source
+    start = script_source.index("\nremove_unit_files() {\n")
+    body = script_source[start : script_source.index("\n}\n", start)]
+    assert '"$UNIT_DIR"/neoracer-*.service' in body
+    assert "sudoers" not in body
+    assert "jupyterlab" not in body
+
+
+@pytest.mark.parametrize("answers", ["1\n", "2\n"], ids=["choice-1", "choice-2"])
+def test_warning_says_services_go_back_to_their_defaults(sandbox: tuple[Path, Path], answers: str) -> None:
+    home, script = sandbox
+    out = run_installer_on_a_terminal(home, script, answers, "--dry-run").stdout
+    assert (
+        "Services go back to their defaults. A service you turned off starts at boot again."
+        in warning_block(out)
+    )
+
+
+def test_choice_1_runs_setup_with_labs_refresh_off(sandbox: tuple[Path, Path]) -> None:
+    # A RACECAR_LABS_REFRESH=1 exported in the shell must not refresh the labs
+    # that choice 1 keeps, so the setup command sets it to 0.
+    home, script = sandbox
+    out = run_installer_on_a_terminal(
+        home, script, "1\n", "--dry-run", extra_env={"RACECAR_LABS_REFRESH": "1"}
+    ).stdout
+    assert (
+        f"[dry-run] env RACECAR_LABS_REFRESH=0 bash {home}/ros2_ws/src/neoracer_ros2_driver/scripts/setup_all.sh"
+        in out
+    )
+
+
+def test_choice_2_runs_setup_unchanged(sandbox: tuple[Path, Path]) -> None:
+    home, script = sandbox
+    out = run_installer(home, script, "--dry-run", "--yes").stdout
+    assert f"[dry-run] bash {home}/ros2_ws/src/neoracer_ros2_driver/scripts/setup_all.sh" in out
+    assert "RACECAR_LABS_REFRESH" not in out
+
+
+def test_summary_and_check_for_choice_1(sandbox: tuple[Path, Path]) -> None:
+    home, script = sandbox
+    (home / "jupyter_ws" / "neoracer-os" / "labs").mkdir(parents=True)
+    out = plain(run_installer_on_a_terminal(home, script, "1\n", "--dry-run").stdout)
+    assert "Labs:             kept as they were. Run 'racecar update --labs' to refresh them." in out
+    assert f"[PASS] {home}/jupyter_ws present" in out
+    assert "recreated by the driver setup" not in out
+    log = newest_log(script)
+    assert "Labs:             kept as they were." in log
+
+
+def test_summary_for_choice_1_on_a_car_with_no_labs(sandbox: tuple[Path, Path]) -> None:
+    # A new card has no labs to keep, so the summary does not say they were kept.
+    home, script = sandbox
+    out = plain(run_installer_on_a_terminal(home, script, "1\n", "--dry-run").stdout)
+    assert "Labs:             none to keep. The driver setup installs the newest labs." in out
+    assert "kept as they were" not in out
+
+
+def test_summary_and_check_for_choice_2(sandbox: tuple[Path, Path]) -> None:
+    # A dry run erases nothing, so the existing folder passes the choice 2 check.
+    home, script = sandbox
+    out = plain(run_installer(home, script, "--dry-run", "--yes").stdout)
+    assert f"[PASS] {home}/jupyter_ws recreated by the driver setup" in out
+    assert "Labs:" not in out
+    assert "Backup:" in out

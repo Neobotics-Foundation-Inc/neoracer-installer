@@ -21,14 +21,20 @@ Earlier entries numbered the installer on its own.
 - Diagnostics for what driver 0.9.0 installs: the seven ROS packages added for mapping and navigation (slam-toolbox, nav2-map-server, nav2-amcl, nav2-lifecycle-manager, robot-state-publisher, xacro, rosbag2-storage-mcap); the data root `~/neoracer_data` and the `~/jupyter_ws/data` and `~/jupyter_ws/maps` links into it; `neoracer-data` and `neoracer-mapview` enabled at boot beside the four core units; `neoracer-autonomy` and the seven lab dashboard units installed and not enabled; the vendor `jupyterlab.service` not enabled; `/etc/sudoers.d/neoracer` as mode 440 owned by root, read through sudo; `/etc/profile.d/neoracer-data.sh`. A healthy car passes 53 checks.
 - Snapshots record `ws.driver_pkg_version`, the size of the data root, and the enable and active state of all fourteen units.
 - The confirmation prompt names what is kept (`~/neoracer_data`, `~/.config/racecar`, `~/osracer_ws`), warns that the tuning inside old lab dashboard checkouts under `~/ros2_ws` is erased, and points a car that already runs the driver to `racecar update`.
+- A reinstall menu before the warning. Choice 1 reinstalls the driver and the student library, and `~/jupyter_ws` remains. Choice 2 reinstalls everything, as every run did before. Enter picks 1. The log records the choice. A dry run with a terminal shows the menu and plans the chosen run.
+- Choice 2 moves `~/jupyter_ws` to `~/jupyter_ws-backup-YYYYMMDD-HHMMSS` before the erase, the scheme of the driver's labs backups. A name that exists already stops the backup, so a backup never lands inside an older one. A failed backup ends the run before anything is erased and starts the stopped services again. The summary names the backup. Old backups stay until someone deletes them.
+- Before the erase, both choices disable each installed `neoracer-*` unit and remove its unit file, and remove any `neoracer-*` boot link left without its unit file. The driver's setup then installs every unit as new: the core units are enabled at boot, and autonomy and the lab dashboards are not. `jupyterlab.service` and `/etc/sudoers.d/neoracer` are left alone.
 
 ### Changed
 - Version numbering: 0.9.0 follows driver 0.9.0. The number says which driver release the installer installs and checks.
 - A core unit counts as enabled only when `systemctl is-enabled` says `enabled`; a unit with no `[Install]` section no longer passes that check.
+- `-y` means choice 2 with no questions. Choice 1 is offered only in the menu.
+- The warning lists only what the chosen run erases. It says where the backup goes in choice 2, and that services go back to their defaults, so a service you turned off starts at boot again.
+- Choice 1 runs the driver's setup with `RACECAR_LABS_REFRESH=0`, so the labs stay as they are. Its summary says `racecar update --labs` refreshes them, and its `~/jupyter_ws` check reads "present" rather than "recreated by the driver setup".
 - README, guide and architecture page describe the 0.9.0 car: six units at boot, the apps page on port 8080, the map viewer on port 8088, the data root, the `racecar` account, and `racecar update` for a car that already runs the driver.
 
 ### Removed
-- `~/data` is no longer erased or created. Driver 0.9.0 writes nothing there, and its setup moves an older car's camlabel images from `~/data/camlabel` into the data root, which the erase used to destroy first. The erase list is `~/jupyter_ws`, `~/ros2_ws` and `~/logs`.
+- `~/data` is no longer erased or created. Driver 0.9.0 writes nothing there, and its setup moves an older car's camlabel images from `~/data/camlabel` into the data root, which the erase used to destroy first. The erase list is `~/ros2_ws` and `~/logs`, with `~/jupyter_ws` in choice 2.
 
 ## [0.2.2] - 2026-10-26
 
