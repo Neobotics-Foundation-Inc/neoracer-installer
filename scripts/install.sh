@@ -39,7 +39,8 @@ DATA_ROOT="$HOME/neoracer_data"
 
 # Paths wiped by step 1, in removal order, for each choice of the reinstall
 # menu. Choice 1 keeps ~/jupyter_ws, the students' notebooks and labs. Choice 2
-# erases it too. WIPE_PATHS is set to one of the two once the choice is made.
+# erases it too: step 1 moves it to a dated backup, then erases the rest.
+# WIPE_PATHS is set to one of the two once the choice is made.
 WIPE_PATHS_CHOICE_1=("$WS_DIR" "$CAR_LOG_DIR")
 WIPE_PATHS_CHOICE_2=("$JUPYTER_WS" "$WS_DIR" "$CAR_LOG_DIR")
 
@@ -134,7 +135,8 @@ Environment:
   DRIVER_URL      Another driver repository, such as a fork.
 
 Steps:
-  [1/3] Remove ~/ros2_ws, ~/logs, and ~/jupyter_ws in choice 2
+  [1/3] Stop the neoracer services. In choice 2, move ~/jupyter_ws to
+        ~/jupyter_ws-backup-YYYYMMDD-HHMMSS. Remove ~/ros2_ws and ~/logs.
   [2/3] Create ~/ros2_ws/src, ~/logs
   [3/3] Clone the driver and run scripts/setup_all.sh
 
@@ -634,11 +636,11 @@ cd "$HOME" || exit 1
 #
 # Choice 1 reinstalls the driver and the student library. ~/jupyter_ws, with
 # the students' notebooks and labs, stays as it is. Choice 2 reinstalls
-# everything: ~/jupyter_ws is erased with the other folders, and the driver's
-# setup installs the newest labs. The menu is shown only when stdin is a
-# terminal and -y is not set. -y means choice 2 with no questions. A run with
-# no terminal and no -y stops at the confirmation below, as it always has, and
-# a dry run with no terminal plans choice 2.
+# everything: step 1 moves ~/jupyter_ws to a dated backup, and the driver's
+# setup makes a new one with the newest labs. The menu is shown only when
+# stdin is a terminal and -y is not set. -y means choice 2 with no questions.
+# A run with no terminal and no -y stops at the confirmation below, as it
+# always has, and a dry run with no terminal plans choice 2.
 # ============================================================================
 REINSTALL_CHOICE=""
 if [ "$ASSUME_YES" = true ]; then
@@ -706,9 +708,10 @@ if [ "$REINSTALL_CHOICE" = 1 ]; then
     log "datasets), ~/.config/racecar (the car profile) and ~/osracer_ws (the"
     log "vendor workspace)."
 else
-    log "Anything you saved in these folders is gone for good: notebooks in"
-    log "~/jupyter_ws, and the tuning saved inside old lab dashboard checkouts"
-    log "under ~/ros2_ws. Back them up first."
+    log "Anything you saved in ~/ros2_ws or ~/logs is gone for good, such as the"
+    log "tuning saved inside old lab dashboard checkouts under ~/ros2_ws. Back it up"
+    log "first. ~/jupyter_ws is moved to ~/jupyter_ws-backup-YYYYMMDD-HHMMSS before"
+    log "the erase. Its notebooks stay there until someone deletes the folder."
     echo ""
     log "Kept: ${DATA_ROOT} (bags, maps, datasets), ~/.config/racecar (the car"
     log "profile) and ~/osracer_ws (the vendor workspace)."
@@ -789,6 +792,60 @@ remove_path() {
     return 1
 }
 
+# Choice 2 keeps the old ~/jupyter_ws in a dated folder beside it, named the
+# way the driver names its labs backups: ~/jupyter_ws-backup-YYYYMMDD-HHMMSS.
+# The folder is moved, not copied, because step 1 erases it right after. A
+# move inside one folder on one disk is a rename, which completes in full or
+# changes nothing. A name that exists already stops the backup, so a backup
+# never lands inside an older one. Old backups stay until someone deletes
+# them. JUPYTER_BACKUP is set to the new path. It stays empty when there is no
+# ~/jupyter_ws to back up.
+backup_jupyter_ws() {
+    JUPYTER_BACKUP=""
+    if [ ! -e "$JUPYTER_WS" ] && [ ! -L "$JUPYTER_WS" ]; then
+        log "  [ -- ] ${JUPYTER_WS} (not present, so no backup is needed)"
+        return 0
+    fi
+
+    local target
+    target="${JUPYTER_WS}-backup-$(date +%Y%m%d-%H%M%S)"
+    if [ -e "$target" ] || [ -L "$target" ]; then
+        log "  [FAIL] ${target} exists already. A backup never goes inside an older one."
+        log_silent "WARNING: backup folder exists already: ${target}"
+        return 1
+    fi
+
+    if [ "$DRY_RUN" = true ]; then
+        log "  [dry-run] would move ${JUPYTER_WS} to ${target}"
+        JUPYTER_BACKUP="$target"
+        return 0
+    fi
+
+    log_silent "MOVING: ${JUPYTER_WS} -> ${target}"
+    mv -- "$JUPYTER_WS" "$target" >>"$LOG_FILE" 2>&1
+    local rc=$?
+    if [ $rc -eq 0 ]; then
+        JUPYTER_BACKUP="$target"
+        log "  [ OK ] moved ${JUPYTER_WS} to ${target}"
+        return 0
+    fi
+    log "  [FAIL] could not move ${JUPYTER_WS} to ${target}"
+    log_silent "WARNING: Command exited with code ${rc}: mv -- ${JUPYTER_WS} ${target}"
+    return 1
+}
+
+# A run that stops before the erase starts the units it stopped again, so the
+# car keeps running its old software.
+restart_stopped_services() {
+    local svc
+    for svc in "${STOPPED_SERVICES[@]}"; do
+        log "  starting ${svc} again"
+        if ! sudo systemctl start "$svc" >>"$LOG_FILE" 2>&1; then
+            log "  [FAIL] ${svc} did not start. See: journalctl -u ${svc}"
+        fi
+    done
+}
+
 # Every running or restarting unit that holds files under the folders about to
 # go, stopped first so removal does not race a running node: the core stack
 # (six units at 0.9.0), the lab dashboards and autonomy (neoracer-*.service,
@@ -801,6 +858,7 @@ running_services() {
     systemctl list-units --type=service --state=active,activating --plain --no-legend \
         'neoracer-*.service' 'jupyterlab.service' 2>/dev/null | awk '{print $1}'
 }
+STOPPED_SERVICES=()
 if command -v systemctl >/dev/null 2>&1; then
     while read -r svc; do
         [ -n "$svc" ] || continue
@@ -809,11 +867,26 @@ if command -v systemctl >/dev/null 2>&1; then
         else
             log "  stopping ${svc}"
             sudo systemctl stop "$svc" >>"$LOG_FILE" 2>&1
+            STOPPED_SERVICES+=("$svc")
         fi
     done < <(running_services)
 fi
 
+# Choice 2 moves ~/jupyter_ws to its backup before anything is erased. A failed
+# backup ends the run here. Nothing is erased yet, and the units stopped above
+# are started again.
+JUPYTER_BACKUP=""
+if [ "$REINSTALL_CHOICE" = 2 ] && ! backup_jupyter_ws; then
+    echo -e "\e[1;31m[ERROR] The backup of ${JUPYTER_WS} failed.\e[0m"
+    restart_stopped_services
+    log "Nothing has been removed."
+    log_silent "========== INSTALL LOG END (ABORTED: backup failed) =========="
+    exit 1
+fi
+
+# In choice 2 the backup above has moved ~/jupyter_ws away, so the erase skips it.
 for path in "${WIPE_PATHS[@]}"; do
+    [ "$path" = "$JUPYTER_WS" ] && continue
     remove_path "$path"
 done
 
@@ -1311,11 +1384,24 @@ INSTALL_DURATION=$((INSTALL_END_TIME - INSTALL_START_TIME))
 INSTALL_MINUTES=$((INSTALL_DURATION / 60))
 INSTALL_SECONDS=$((INSTALL_DURATION % 60))
 
+# Choice 2 names the folder that holds the old ~/jupyter_ws.
+if [ -z "$JUPYTER_BACKUP" ]; then
+    SUMMARY_BACKUP="none; there was no ${JUPYTER_WS} to back up"
+elif [ "$DRY_RUN" = true ]; then
+    SUMMARY_BACKUP="${JUPYTER_BACKUP} (dry run, not made)"
+else
+    SUMMARY_BACKUP="$JUPYTER_BACKUP"
+fi
+
 log ""
 echo -e "\e[1;36m======================== INSTALLATION SUMMARY ========================\e[0m"
 echo -e "  Installer:        \e[1mv${INSTALLER_VERSION}\e[0m"
 echo -e "  Driver:           \e[1m${DRIVER_NAME} ${DRIVER_REV:-not cloned}\e[0m (was ${DRIVER_REV_BEFORE:-none})"
 echo -e "  Workspace:        \e[1m${WS_DIR}\e[0m"
+if [ "$REINSTALL_CHOICE" = 2 ]; then
+    echo -e "  Backup:           \e[1m${SUMMARY_BACKUP}\e[0m"
+    echo -e "                    Old backups stay until someone deletes them."
+fi
 echo -e "  Checks:           \e[1m${PASS}/${TOTAL} passed, ${WARN} warning(s)\e[0m"
 echo -e "  Log file:         \e[1m${LOG_FILE}\e[0m"
 echo -e "  Duration:         \e[1m${INSTALL_MINUTES}m ${INSTALL_SECONDS}s\e[0m"
@@ -1325,6 +1411,10 @@ log_silent "======================== INSTALLATION SUMMARY ======================
 log_silent "  Installer:        v${INSTALLER_VERSION}"
 log_silent "  Driver:           ${DRIVER_NAME} ${DRIVER_REV:-not cloned} (was ${DRIVER_REV_BEFORE:-none})"
 log_silent "  Workspace:        ${WS_DIR}"
+if [ "$REINSTALL_CHOICE" = 2 ]; then
+    log_silent "  Backup:           ${SUMMARY_BACKUP}"
+    log_silent "                    Old backups stay until someone deletes them."
+fi
 log_silent "  Checks:           ${PASS}/${TOTAL} passed, ${WARN} warning(s)"
 log_silent "  Log file:         ${LOG_FILE}"
 log_silent "  Duration:         ${INSTALL_MINUTES}m ${INSTALL_SECONDS}s"
