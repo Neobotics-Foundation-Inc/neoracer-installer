@@ -142,7 +142,8 @@ Steps:
         ~/jupyter_ws-backup-YYYYMMDD-HHMMSS. Disable and remove the
         neoracer unit files. Remove ~/ros2_ws and ~/logs.
   [2/3] Create ~/ros2_ws/src, ~/logs
-  [3/3] Clone the driver and run scripts/setup_all.sh
+  [3/3] Clone the driver and run scripts/setup_all.sh. Choice 1 runs it
+        with RACECAR_LABS_REFRESH=0, so the labs stay as they are.
 
 Every run is logged to neoracer-installer/logs/.
 USAGEEOF
@@ -992,8 +993,18 @@ fi
 SETUP_SCRIPT="${SRC_DIR}/${DRIVER_NAME}/scripts/setup_all.sh"
 SETUP_RC=0
 
+# Choice 1 keeps ~/jupyter_ws. The driver's setup leaves existing labs alone
+# unless RACECAR_LABS_REFRESH is 1. The command sets it to 0, so a value
+# exported in the shell cannot refresh the labs. Choice 2 sets nothing:
+# ~/jupyter_ws is gone, and the setup copies fresh labs.
+if [ "$REINSTALL_CHOICE" = 1 ]; then
+    SETUP_CMD=(env RACECAR_LABS_REFRESH=0 bash "$SETUP_SCRIPT")
+else
+    SETUP_CMD=(bash "$SETUP_SCRIPT")
+fi
+
 if [ "$DRY_RUN" = true ]; then
-    log "  [dry-run] bash ${SETUP_SCRIPT}"
+    log "  [dry-run] ${SETUP_CMD[*]}"
 elif [ "$CLONE_RC" -ne 0 ] || [ ! -f "$SETUP_SCRIPT" ]; then
     echo ""
     echo -e "\e[1;31m=========================================================================="
@@ -1008,8 +1019,8 @@ elif [ "$CLONE_RC" -ne 0 ] || [ ! -f "$SETUP_SCRIPT" ]; then
     SETUP_RC=1
 else
     log ""
-    log "Running ${SETUP_SCRIPT}"
-    run_cmd bash "$SETUP_SCRIPT" || SETUP_RC=$?
+    log "Running ${SETUP_CMD[*]}"
+    run_cmd "${SETUP_CMD[@]}" || SETUP_RC=$?
     if [ "$SETUP_RC" -ne 0 ]; then
         echo ""
         echo -e "\e[1;31m[ERROR] The driver setup exited with code ${SETUP_RC}.\e[0m"
@@ -1112,9 +1123,11 @@ for path in "${CREATE_PATHS[@]}"; do
     fi
 done
 
-# setup_jupyter.sh recreates ~/jupyter_ws, so a missing one means that phase
-# never ran.
-if [ -d "$JUPYTER_WS" ]; then
+# setup_jupyter.sh recreates ~/jupyter_ws after choice 2 erased it, so a
+# missing one means that phase never ran. Choice 1 kept the folder.
+if [ -d "$JUPYTER_WS" ] && [ "$REINSTALL_CHOICE" = 1 ]; then
+    check_pass "${JUPYTER_WS} present"
+elif [ -d "$JUPYTER_WS" ]; then
     check_pass "${JUPYTER_WS} recreated by the driver setup"
 else
     check_fail "${JUPYTER_WS} not found (JupyterLab phase did not run)"
@@ -1449,7 +1462,9 @@ echo -e "\e[1;36m======================== INSTALLATION SUMMARY =================
 echo -e "  Installer:        \e[1mv${INSTALLER_VERSION}\e[0m"
 echo -e "  Driver:           \e[1m${DRIVER_NAME} ${DRIVER_REV:-not cloned}\e[0m (was ${DRIVER_REV_BEFORE:-none})"
 echo -e "  Workspace:        \e[1m${WS_DIR}\e[0m"
-if [ "$REINSTALL_CHOICE" = 2 ]; then
+if [ "$REINSTALL_CHOICE" = 1 ]; then
+    echo -e "  Labs:             \e[1mkept as they were. Run 'racecar update --labs' to refresh them.\e[0m"
+else
     echo -e "  Backup:           \e[1m${SUMMARY_BACKUP}\e[0m"
     echo -e "                    Old backups stay until someone deletes them."
 fi
@@ -1462,7 +1477,9 @@ log_silent "======================== INSTALLATION SUMMARY ======================
 log_silent "  Installer:        v${INSTALLER_VERSION}"
 log_silent "  Driver:           ${DRIVER_NAME} ${DRIVER_REV:-not cloned} (was ${DRIVER_REV_BEFORE:-none})"
 log_silent "  Workspace:        ${WS_DIR}"
-if [ "$REINSTALL_CHOICE" = 2 ]; then
+if [ "$REINSTALL_CHOICE" = 1 ]; then
+    log_silent "  Labs:             kept as they were. Run 'racecar update --labs' to refresh them."
+else
     log_silent "  Backup:           ${SUMMARY_BACKUP}"
     log_silent "                    Old backups stay until someone deletes them."
 fi

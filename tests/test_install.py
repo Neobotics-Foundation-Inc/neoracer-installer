@@ -849,3 +849,42 @@ def test_warning_says_services_go_back_to_their_defaults(sandbox: tuple[Path, Pa
         "Services go back to their defaults. A service you turned off starts at boot again."
         in warning_block(out)
     )
+
+
+def test_choice_1_runs_setup_with_labs_refresh_off(sandbox: tuple[Path, Path]) -> None:
+    # A RACECAR_LABS_REFRESH=1 exported in the shell must not refresh the labs
+    # that choice 1 keeps, so the setup command sets it to 0.
+    home, script = sandbox
+    out = run_installer_on_a_terminal(
+        home, script, "1\n", "--dry-run", extra_env={"RACECAR_LABS_REFRESH": "1"}
+    ).stdout
+    assert (
+        f"[dry-run] env RACECAR_LABS_REFRESH=0 bash {home}/ros2_ws/src/neoracer_ros2_driver/scripts/setup_all.sh"
+        in out
+    )
+
+
+def test_choice_2_runs_setup_unchanged(sandbox: tuple[Path, Path]) -> None:
+    home, script = sandbox
+    out = run_installer(home, script, "--dry-run", "--yes").stdout
+    assert f"[dry-run] bash {home}/ros2_ws/src/neoracer_ros2_driver/scripts/setup_all.sh" in out
+    assert "RACECAR_LABS_REFRESH" not in out
+
+
+def test_summary_and_check_for_choice_1(sandbox: tuple[Path, Path]) -> None:
+    home, script = sandbox
+    out = plain(run_installer_on_a_terminal(home, script, "1\n", "--dry-run").stdout)
+    assert "Labs:             kept as they were. Run 'racecar update --labs' to refresh them." in out
+    assert f"[PASS] {home}/jupyter_ws present" in out
+    assert "recreated by the driver setup" not in out
+    log = newest_log(script)
+    assert "Labs:             kept as they were." in log
+
+
+def test_summary_and_check_for_choice_2(sandbox: tuple[Path, Path]) -> None:
+    # A dry run erases nothing, so the existing folder passes the choice 2 check.
+    home, script = sandbox
+    out = plain(run_installer(home, script, "--dry-run", "--yes").stdout)
+    assert f"[PASS] {home}/jupyter_ws recreated by the driver setup" in out
+    assert "Labs:" not in out
+    assert "Backup:" in out
