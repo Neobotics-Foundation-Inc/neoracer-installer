@@ -78,6 +78,9 @@ ALL_SERVICES=("${CORE_SERVICES[@]}" "${ONDEMAND_SERVICES[@]}" "${DASHBOARD_SERVI
 SUDOERS_FILE="/etc/sudoers.d/neoracer"
 PROFILE_FILE="/etc/profile.d/neoracer-data.sh"
 
+# The folder where setup_services.sh installs the unit files.
+UNIT_DIR="/etc/systemd/system"
+
 # ROS packages the driver's setup_ros2.sh installs beyond ros-base, checked
 # after the run. Mapping and navigation joined the list at 0.9.0.
 DRIVER_ROS_PKGS=(
@@ -136,7 +139,8 @@ Environment:
 
 Steps:
   [1/3] Stop the neoracer services. In choice 2, move ~/jupyter_ws to
-        ~/jupyter_ws-backup-YYYYMMDD-HHMMSS. Remove ~/ros2_ws and ~/logs.
+        ~/jupyter_ws-backup-YYYYMMDD-HHMMSS. Disable and remove the
+        neoracer unit files. Remove ~/ros2_ws and ~/logs.
   [2/3] Create ~/ros2_ws/src, ~/logs
   [3/3] Clone the driver and run scripts/setup_all.sh
 
@@ -717,6 +721,8 @@ else
     log "profile) and ~/osracer_ws (the vendor workspace)."
 fi
 echo ""
+log "Services go back to their defaults. A service you turned off starts at boot again."
+echo ""
 log "A car that already runs the driver keeps everything with: racecar update"
 echo -e "==========================================================================\e[0m"
 log ""
@@ -834,6 +840,42 @@ backup_jupyter_ws() {
     return 1
 }
 
+# Each installed neoracer unit is disabled and its unit file removed before the
+# erase, in both choices. The driver's setup then installs every unit as new.
+# Setup enables a core unit only when its unit file is new on that run, so the
+# core units start at boot again, and autonomy and the lab dashboards are
+# installed and not enabled. Each unit is disabled before its file goes, so no
+# boot link is left behind to start the reinstalled unit at boot. The vendor
+# jupyterlab.service and /etc/sudoers.d/neoracer are left alone.
+remove_unit_files() {
+    local unit svc found=0
+    for unit in "$UNIT_DIR"/neoracer-*.service; do
+        [ -e "$unit" ] || [ -L "$unit" ] || continue
+        found=1
+        svc=$(basename "$unit")
+        if [ "$DRY_RUN" = true ]; then
+            log "  [dry-run] would disable ${svc}"
+            log "  [dry-run] would remove ${unit}"
+            continue
+        fi
+        log "  disabling ${svc}"
+        sudo systemctl disable "$svc" >>"$LOG_FILE" 2>&1 \
+            || log_silent "WARNING: Command exited with code $?: systemctl disable ${svc}"
+        log "  removing ${unit}"
+        sudo rm -f -- "$unit" >>"$LOG_FILE" 2>&1 \
+            || log_silent "WARNING: Command exited with code $?: rm -f ${unit}"
+    done
+    [ "$found" = 1 ] || return 0
+
+    if [ "$DRY_RUN" = true ]; then
+        log "  [dry-run] would run systemctl daemon-reload"
+        return 0
+    fi
+    log "  reloading the systemd unit files"
+    sudo systemctl daemon-reload >>"$LOG_FILE" 2>&1 \
+        || log_silent "WARNING: Command exited with code $?: systemctl daemon-reload"
+}
+
 # A run that stops before the erase starts the units it stopped again, so the
 # car keeps running its old software.
 restart_stopped_services() {
@@ -853,7 +895,10 @@ restart_stopped_services() {
 # jupyterlab.service, which serves ~/jupyter_ws until the driver's phase 8
 # retires it. A unit waiting out its RestartSec after a crash is "activating",
 # not "active", so both states are listed; stopping it also cancels the pending
-# restart. Stopped, not disabled: the driver's setup sets what runs at boot.
+# restart. The neoracer units are then disabled and their unit files removed
+# (remove_unit_files), so the driver's setup installs each one as new and sets
+# what runs at boot. jupyterlab.service is only stopped; the driver's phase 8
+# disables it.
 running_services() {
     systemctl list-units --type=service --state=active,activating --plain --no-legend \
         'neoracer-*.service' 'jupyterlab.service' 2>/dev/null | awk '{print $1}'
@@ -882,6 +927,12 @@ if [ "$REINSTALL_CHOICE" = 2 ] && ! backup_jupyter_ws; then
     log "Nothing has been removed."
     log_silent "========== INSTALL LOG END (ABORTED: backup failed) =========="
     exit 1
+fi
+
+# Both choices return the neoracer units to the driver's defaults. This comes
+# after the backup, so a run that stops there still has its units to start.
+if command -v systemctl >/dev/null 2>&1; then
+    remove_unit_files
 fi
 
 # In choice 2 the backup above has moved ~/jupyter_ws away, so the erase skips it.

@@ -763,3 +763,89 @@ def test_stopped_services_are_started_again(tmp_path: Path, script_source: str) 
     log = (tmp_path / "function.log").read_text()
     assert "sudo systemctl start neoracer-teleop.service" in log
     assert "sudo systemctl start jupyterlab.service" in log
+
+
+def _unit_dir(tmp_path: Path) -> Path:
+    units = tmp_path / "systemd"
+    (units / "multi-user.target.wants").mkdir(parents=True)
+    for name in ("neoracer-teleop.service", "neoracer-camlabel.service", "jupyterlab.service"):
+        (units / name).write_text("[Unit]\n")
+    return units
+
+
+def test_unit_files_plan_in_a_dry_run(tmp_path: Path, script_source: str) -> None:
+    units = _unit_dir(tmp_path)
+    result = run_function(
+        script_source, "remove_unit_files", tmp_path, "remove_unit_files",
+        setup=f"DRY_RUN=true\nUNIT_DIR={shlex.quote(str(units))}",
+    )
+    for svc in ("neoracer-camlabel.service", "neoracer-teleop.service"):
+        assert f"[dry-run] would disable {svc}" in result.stdout
+        assert f"[dry-run] would remove {units}/{svc}" in result.stdout
+        assert (units / svc).is_file()
+    assert "[dry-run] would run systemctl daemon-reload" in result.stdout
+    assert "jupyterlab" not in result.stdout
+
+
+def test_unit_files_are_disabled_then_removed(tmp_path: Path, script_source: str) -> None:
+    # Each neoracer unit is disabled before its file goes, then systemd reloads
+    # once. The vendor jupyterlab.service stays.
+    units = _unit_dir(tmp_path)
+    result = run_function(
+        script_source, "remove_unit_files", tmp_path, "remove_unit_files",
+        setup=(
+            f"UNIT_DIR={shlex.quote(str(units))}\n"
+            'sudo() { echo "sudo $*" >> "$HOME/calls"; "$@"; }\n'
+            "systemctl() { :; }"
+        ),
+    )
+    assert result.returncode == 0, result.stderr
+    assert not (units / "neoracer-teleop.service").exists()
+    assert not (units / "neoracer-camlabel.service").exists()
+    assert (units / "jupyterlab.service").is_file()
+    calls = (tmp_path / "calls").read_text().splitlines()
+    for svc in ("neoracer-camlabel.service", "neoracer-teleop.service"):
+        disable = calls.index(f"sudo systemctl disable {svc}")
+        remove = calls.index(f"sudo rm -f -- {units}/{svc}")
+        assert disable < remove
+    assert calls[-1] == "sudo systemctl daemon-reload"
+    assert calls.count("sudo systemctl daemon-reload") == 1
+    assert not any("jupyterlab" in call for call in calls)
+
+
+def test_no_unit_files_means_no_reload(tmp_path: Path, script_source: str) -> None:
+    units = tmp_path / "systemd"
+    units.mkdir()
+    result = run_function(
+        script_source, "remove_unit_files", tmp_path, "remove_unit_files",
+        setup=(
+            f"UNIT_DIR={shlex.quote(str(units))}\n"
+            'sudo() { echo "sudo $*" >> "$HOME/calls"; }'
+        ),
+    )
+    assert result.returncode == 0
+    assert not (tmp_path / "calls").exists()
+
+
+def test_unit_files_go_after_the_backup_and_before_the_erase(script_source: str) -> None:
+    removal = script_source.index("[1/3] Removing existing systems and code")
+    backup = script_source.index('if [ "$REINSTALL_CHOICE" = 2 ] && ! backup_jupyter_ws; then', removal)
+    units = script_source.index("    remove_unit_files\n", removal)
+    wipe = script_source.index('for path in "${WIPE_PATHS[@]}"', removal)
+    assert backup < units < wipe
+    assert 'UNIT_DIR="/etc/systemd/system"' in script_source
+    start = script_source.index("\nremove_unit_files() {\n")
+    body = script_source[start : script_source.index("\n}\n", start)]
+    assert '"$UNIT_DIR"/neoracer-*.service' in body
+    assert "sudoers" not in body
+    assert "jupyterlab" not in body
+
+
+@pytest.mark.parametrize("answers", ["1\n", "2\n"], ids=["choice-1", "choice-2"])
+def test_warning_says_services_go_back_to_their_defaults(sandbox: tuple[Path, Path], answers: str) -> None:
+    home, script = sandbox
+    out = run_installer_on_a_terminal(home, script, answers, "--dry-run").stdout
+    assert (
+        "Services go back to their defaults. A service you turned off starts at boot again."
+        in warning_block(out)
+    )
