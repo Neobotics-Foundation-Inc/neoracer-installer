@@ -589,6 +589,15 @@ def test_yes_skips_the_menu_and_plans_choice_2(sandbox: tuple[Path, Path]) -> No
     assert "This run reinstalls everything (choice 2). --yes skips the menu." in out
     assert "Reinstall choice: 2 (set by --yes)" in newest_log(script)
     assert f"{home}/jupyter_ws  (" in warning_block(out)
+    # The folder is moved, not erased, and its line in the list says so.
+    jupyter_line = next(
+        line for line in warning_block(out).splitlines() if f"{home}/jupyter_ws  (" in line
+    )
+    assert jupyter_line.endswith("(moved to a dated backup first)")
+    ros2_line = next(
+        line for line in warning_block(out).splitlines() if f"{home}/ros2_ws  (" in line
+    )
+    assert "moved to a dated backup" not in ros2_line
 
 
 def test_dry_run_without_a_terminal_plans_choice_2(sandbox: tuple[Path, Path]) -> None:

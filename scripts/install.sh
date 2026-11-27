@@ -702,10 +702,16 @@ log ""
 echo -e "\e[33m=========================================================================="
 log "[WARNING] The following directories will be erased:"
 echo "=========================================================================="
+# ~/jupyter_ws is listed only in choice 2, and that run moves it to a backup
+# instead of erasing it, so its line says so.
 for path in "${WIPE_PATHS[@]}"; do
     if [ -e "$path" ]; then
         SIZE=$(du -sh "$path" 2>/dev/null | cut -f1)
-        log "  ${path}  (${SIZE:-unknown size})"
+        if [ "$path" = "$JUPYTER_WS" ]; then
+            log "  ${path}  (${SIZE:-unknown size})  (moved to a dated backup first)"
+        else
+            log "  ${path}  (${SIZE:-unknown size})"
+        fi
     else
         log "  ${path}  (not present)"
     fi
