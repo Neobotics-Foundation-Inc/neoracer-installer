@@ -4,6 +4,8 @@
 #
 # Wipes the car's software state, re-clones the ROS2 driver, and re-runs the
 # driver's own setup orchestrator, then verifies every component it installed.
+# Before the erase, the operator chooses in a menu whether ~/jupyter_ws, with
+# the students' notebooks, is kept.
 # Target: Jetson Orin Nano, JetPack 6.x / Ubuntu 22.04 (Jammy), ROS2 Humble.
 #
 # Usage: bash neoracer-installer/scripts/install.sh [-y] [--dry-run]
@@ -35,8 +37,11 @@ CAR_LOG_DIR="$HOME/logs"
 # Never erased or created here; the driver's setup moves old data into it.
 DATA_ROOT="$HOME/neoracer_data"
 
-# Paths wiped by step 1, in removal order.
-WIPE_PATHS=("$JUPYTER_WS" "$WS_DIR" "$CAR_LOG_DIR")
+# Paths wiped by step 1, in removal order, for each choice of the reinstall
+# menu. Choice 1 keeps ~/jupyter_ws, the students' notebooks and labs. Choice 2
+# erases it too. WIPE_PATHS is set to one of the two once the choice is made.
+WIPE_PATHS_CHOICE_1=("$WS_DIR" "$CAR_LOG_DIR")
+WIPE_PATHS_CHOICE_2=("$JUPYTER_WS" "$WS_DIR" "$CAR_LOG_DIR")
 
 # Paths created by step 2.
 CREATE_PATHS=("$SRC_DIR" "$CAR_LOG_DIR")
@@ -108,9 +113,18 @@ usage() {
 
 Usage: bash neoracer-installer/scripts/install.sh [options]
 
+Before the erase, a run with a terminal shows this menu:
+  1) The driver and the student library. ~/jupyter_ws remains.
+  2) Everything. ~/jupyter_ws is erased too, and the newest labs are installed.
+Pressing Enter picks 1. A typed 'yes' then confirms the erase.
+
 Options:
-  -y, --yes       Skip the confirmation prompt before erasing car software.
+  -y, --yes       Reinstall everything (choice 2) with no questions. The menu
+                  and the confirmation prompt are skipped. A real run without
+                  a terminal needs this option.
       --dry-run   Print every action without erasing, cloning, or installing.
+                  With a terminal and no -y, the menu is shown and the plan
+                  follows the choice. Without a terminal, the plan is choice 2.
   -h, --help      Show this message.
 
 Environment:
@@ -120,7 +134,7 @@ Environment:
   DRIVER_URL      Another driver repository, such as a fork.
 
 Steps:
-  [1/3] Remove ~/jupyter_ws, ~/ros2_ws, ~/logs
+  [1/3] Remove ~/ros2_ws, ~/logs, and ~/jupyter_ws in choice 2
   [2/3] Create ~/ros2_ws/src, ~/logs
   [3/3] Clone the driver and run scripts/setup_all.sh
 
@@ -616,6 +630,58 @@ fi
 cd "$HOME" || exit 1
 
 # ============================================================================
+# Reinstall choice
+#
+# Choice 1 reinstalls the driver and the student library. ~/jupyter_ws, with
+# the students' notebooks and labs, stays as it is. Choice 2 reinstalls
+# everything: ~/jupyter_ws is erased with the other folders, and the driver's
+# setup installs the newest labs. The menu is shown only when stdin is a
+# terminal and -y is not set. -y means choice 2 with no questions. A run with
+# no terminal and no -y stops at the confirmation below, as it always has, and
+# a dry run with no terminal plans choice 2.
+# ============================================================================
+REINSTALL_CHOICE=""
+if [ "$ASSUME_YES" = true ]; then
+    REINSTALL_CHOICE=2
+    log ""
+    log "This run reinstalls everything (choice 2). --yes skips the menu."
+    log_silent "Reinstall choice: 2 (set by --yes)"
+elif [ -t 0 ]; then
+    log ""
+    log "What should this run reinstall?"
+    log "  1) The driver and the student library. ~/jupyter_ws remains."
+    log "  2) Everything. ~/jupyter_ws is erased too, and the newest labs are installed."
+    while [ -z "$REINSTALL_CHOICE" ]; do
+        echo -n "Choose 1 or 2 [1]: "
+        if ! read -r CHOICE_ANSWER; then
+            echo ""
+            log "No choice was made. Nothing has been removed."
+            log_silent "========== INSTALL LOG END (ABORTED: no reinstall choice) =========="
+            exit 1
+        fi
+        log_silent "Reinstall menu answer: '${CHOICE_ANSWER}'"
+        case "$CHOICE_ANSWER" in
+            ""|1) REINSTALL_CHOICE=1 ;;
+            2)    REINSTALL_CHOICE=2 ;;
+        esac
+    done
+    log_silent "Reinstall choice: ${REINSTALL_CHOICE} (menu)"
+else
+    REINSTALL_CHOICE=2
+    if [ "$DRY_RUN" = true ]; then
+        log ""
+        log "  [dry-run] there is no terminal for the menu, so the run plans choice 2, as --yes does"
+    fi
+    log_silent "Reinstall choice: 2 (no terminal)"
+fi
+
+if [ "$REINSTALL_CHOICE" = 1 ]; then
+    WIPE_PATHS=("${WIPE_PATHS_CHOICE_1[@]}")
+else
+    WIPE_PATHS=("${WIPE_PATHS_CHOICE_2[@]}")
+fi
+
+# ============================================================================
 # Confirmation
 # ============================================================================
 log ""
@@ -631,12 +697,22 @@ for path in "${WIPE_PATHS[@]}"; do
     fi
 done
 echo ""
-log "Anything you saved in these folders is gone for good: notebooks in"
-log "~/jupyter_ws, and the tuning saved inside old lab dashboard checkouts"
-log "under ~/ros2_ws. Back them up first."
-echo ""
-log "Kept: ${DATA_ROOT} (bags, maps, datasets), ~/.config/racecar (the car"
-log "profile) and ~/osracer_ws (the vendor workspace)."
+if [ "$REINSTALL_CHOICE" = 1 ]; then
+    log "Anything you saved in these folders is gone for good, such as the"
+    log "tuning saved inside old lab dashboard checkouts under ~/ros2_ws."
+    log "Back it up first."
+    echo ""
+    log "Kept: ~/jupyter_ws (notebooks and labs), ${DATA_ROOT} (bags, maps,"
+    log "datasets), ~/.config/racecar (the car profile) and ~/osracer_ws (the"
+    log "vendor workspace)."
+else
+    log "Anything you saved in these folders is gone for good: notebooks in"
+    log "~/jupyter_ws, and the tuning saved inside old lab dashboard checkouts"
+    log "under ~/ros2_ws. Back them up first."
+    echo ""
+    log "Kept: ${DATA_ROOT} (bags, maps, datasets), ~/.config/racecar (the car"
+    log "profile) and ~/osracer_ws (the vendor workspace)."
+fi
 echo ""
 log "A car that already runs the driver keeps everything with: racecar update"
 echo -e "==========================================================================\e[0m"

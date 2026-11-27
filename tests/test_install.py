@@ -3,14 +3,17 @@
 The installer erases the car and installs ROS2, so the suite never runs it for
 real. Behavior is covered through --dry-run against a sandbox $HOME; the guards
 that can only fire on a real run are covered by reading the script source.
+The reinstall menu reads a terminal, so those runs put stdin on a pseudo-terminal.
 """
 
 from __future__ import annotations
 
 import os
+import pty
 import re
 import shutil
 import subprocess
+import termios
 from pathlib import Path
 
 import pytest
@@ -44,6 +47,8 @@ def sandbox(tmp_path: Path) -> tuple[Path, Path]:
 def run_installer(
     home: Path, script: Path, *args: str, extra_env: dict[str, str] | None = None
 ) -> subprocess.CompletedProcess[str]:
+    # stdin is never a terminal here, even when pytest runs in one, so the
+    # reinstall menu is not shown.
     env = dict(os.environ)
     env["HOME"] = str(home)
     env.update(extra_env or {})
@@ -51,10 +56,50 @@ def run_installer(
         ["bash", str(script), *args],
         env=env,
         cwd=str(home),
+        stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
         timeout=300,
     )
+
+
+def run_installer_on_a_terminal(
+    home: Path, script: Path, answers: str, *args: str, extra_env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
+    """Run the installer with stdin on a pseudo-terminal and type the answers.
+
+    [ -t 0 ] is true on the terminal, so the reinstall menu is shown. stdout
+    and stderr stay pipes. Echo is off, so the typed answers are not repeated.
+    """
+    env = dict(os.environ)
+    env["HOME"] = str(home)
+    env.update(extra_env or {})
+    controller, terminal = pty.openpty()
+    attrs = termios.tcgetattr(terminal)
+    attrs[3] &= ~termios.ECHO
+    termios.tcsetattr(terminal, termios.TCSANOW, attrs)
+    try:
+        proc = subprocess.Popen(
+            ["bash", str(script), *args],
+            env=env,
+            cwd=str(home),
+            stdin=terminal,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    finally:
+        os.close(terminal)
+    try:
+        os.write(controller, answers.encode())
+        out, err = proc.communicate(timeout=300)
+    finally:
+        os.close(controller)
+    return subprocess.CompletedProcess(proc.args, proc.returncode, out, err)
+
+
+def newest_log(script: Path) -> str:
+    return max((script.parent.parent / "logs").glob("install_*.log")).read_text()
 
 
 def test_script_is_executable() -> None:
@@ -447,3 +492,112 @@ def test_every_running_service_is_stopped_before_removal(script_source: str) -> 
     assert removal < stop < wipe
     # A unit waiting to restart after a crash is "activating"; it must be stopped too.
     assert "--state=active,activating" in script_source
+
+
+MENU = (
+    "What should this run reinstall?\n"
+    "  1) The driver and the student library. ~/jupyter_ws remains.\n"
+    "  2) Everything. ~/jupyter_ws is erased too, and the newest labs are installed.\n"
+    "Choose 1 or 2 [1]: "
+)
+
+
+def warning_block(out: str) -> str:
+    start = out.index("[WARNING] The following directories will be erased:")
+    return out[start : out.index("racecar update", start)]
+
+
+def test_menu_text_is_exact(sandbox: tuple[Path, Path]) -> None:
+    home, script = sandbox
+    out = run_installer_on_a_terminal(home, script, "1\n", "--dry-run").stdout
+    assert MENU in out
+    # The menu comes before the warning, so the warning can list the chosen run.
+    assert out.index(MENU) < out.index("[WARNING] The following directories will be erased:")
+
+
+@pytest.mark.parametrize(
+    ("answers", "choice", "prompts"),
+    [
+        ("1\n", "1", 1),
+        ("2\n", "2", 1),
+        ("\n", "1", 1),
+        ("x\n1\n", "1", 2),
+    ],
+    ids=["one", "two", "enter", "invalid-then-one"],
+)
+def test_menu_answers(sandbox: tuple[Path, Path], answers: str, choice: str, prompts: int) -> None:
+    # Enter picks 1. Any other answer than 1, 2 or empty shows the prompt again.
+    home, script = sandbox
+    result = run_installer_on_a_terminal(home, script, answers, "--dry-run")
+    assert result.returncode == 0, result.stdout
+    assert result.stdout.count("Choose 1 or 2 [1]: ") == prompts
+    assert f"Reinstall choice: {choice} (menu)" in newest_log(script)
+
+
+def test_menu_closed_without_an_answer_stops_the_run(sandbox: tuple[Path, Path]) -> None:
+    # Ctrl-D at the prompt ends stdin. The run stops before the warning.
+    home, script = sandbox
+    result = run_installer_on_a_terminal(home, script, "\x04", "--dry-run")
+    assert result.returncode == 1
+    assert "No choice was made. Nothing has been removed." in result.stdout
+    assert "[WARNING]" not in result.stdout
+
+
+def test_yes_skips_the_menu_and_plans_choice_2(sandbox: tuple[Path, Path]) -> None:
+    home, script = sandbox
+    out = run_installer(home, script, "--dry-run", "--yes").stdout
+    assert "What should this run reinstall?" not in out
+    assert "This run reinstalls everything (choice 2). --yes skips the menu." in out
+    assert "Reinstall choice: 2 (set by --yes)" in newest_log(script)
+    assert f"{home}/jupyter_ws  (" in warning_block(out)
+
+
+def test_dry_run_without_a_terminal_plans_choice_2(sandbox: tuple[Path, Path]) -> None:
+    home, script = sandbox
+    result = run_installer(home, script, "--dry-run")
+    assert result.returncode == 0, result.stdout
+    assert "What should this run reinstall?" not in result.stdout
+    assert "there is no terminal for the menu, so the run plans choice 2" in result.stdout
+    assert "Reinstall choice: 2 (no terminal)" in newest_log(script)
+    assert f"{home}/jupyter_ws  (" in warning_block(result.stdout)
+
+
+def test_warning_for_choice_1_keeps_jupyter_ws(sandbox: tuple[Path, Path]) -> None:
+    home, script = sandbox
+    out = run_installer_on_a_terminal(home, script, "1\n", "--dry-run").stdout
+    warning = warning_block(out)
+    assert f"{home}/ros2_ws  (" in warning
+    assert f"{home}/logs  (" in warning
+    assert f"{home}/jupyter_ws  (" not in warning
+    assert "notebooks in" not in warning
+    assert "Kept: ~/jupyter_ws (notebooks and labs)" in warning
+    assert "lab dashboard checkouts under ~/ros2_ws." in warning
+
+
+def test_warning_for_choice_2_lists_every_folder(sandbox: tuple[Path, Path]) -> None:
+    home, script = sandbox
+    out = run_installer_on_a_terminal(home, script, "2\n", "--dry-run").stdout
+    warning = warning_block(out)
+    for name in ("jupyter_ws", "ros2_ws", "logs"):
+        assert f"{home}/{name}  (" in warning
+    assert f"Kept: {home}/neoracer_data" in warning
+    assert "Kept: ~/jupyter_ws" not in warning
+
+
+def test_choice_1_leaves_jupyter_ws_out_of_the_erase(sandbox: tuple[Path, Path]) -> None:
+    home, script = sandbox
+    out = run_installer_on_a_terminal(home, script, "1\n", "--dry-run").stdout
+    assert f"would remove {home}/jupyter_ws" not in out
+    assert f"would remove {home}/ros2_ws" in out
+    assert f"would remove {home}/logs" in out
+
+
+def test_no_terminal_without_yes_stops_before_anything_changes(script_source: str) -> None:
+    # The menu reads a terminal only. With no terminal and no -y, the
+    # confirmation stops the run before the first step changes anything.
+    menu = script_source.index('elif [ -t 0 ]; then\n    log ""\n    log "What should this run reinstall?"')
+    warning = script_source.index('log "[WARNING] The following directories will be erased:"')
+    stop = script_source.index("No terminal available to confirm the erase")
+    removal = script_source.index("[1/3] Removing existing systems and code")
+    assert menu < warning < stop < removal
+    assert "exit 1" in script_source[stop:removal]
