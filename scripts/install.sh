@@ -4,34 +4,96 @@
 #
 # Wipes the car's software state, re-clones the ROS2 driver, and re-runs the
 # driver's own setup orchestrator, then verifies every component it installed.
+# Before the erase, the operator chooses in a menu whether ~/jupyter_ws, with
+# the students' notebooks, is kept.
 # Target: Jetson Orin Nano, JetPack 6.x / Ubuntu 22.04 (Jammy), ROS2 Humble.
 #
 # Usage: bash neoracer-installer/scripts/install.sh [-y] [--dry-run]
 
 # static variables
-INSTALLER_VERSION="0.2.2"
-DRIVER_URL="https://github.com/Neobotics-Foundation-Inc/neoracer_ros2_driver.git"
+# The version follows the driver release the installer sets a car up for:
+# installer 0.9.x installs and checks driver 0.9.x.
+INSTALLER_VERSION="0.9.0"
+# The driver repository and, when set, the branch or tag to clone instead of
+# the default branch. Both mirror LIB_REPO and LIB_PIN in the driver's
+# setup_jupyter.sh: a way to test an unreleased revision on a car. The clone
+# keeps every branch, so `racecar update` still reaches main afterwards.
+DRIVER_URL="${DRIVER_URL:-https://github.com/Neobotics-Foundation-Inc/neoracer_ros2_driver.git}"
+DRIVER_REF="${DRIVER_REF:-}"
 DRIVER_NAME="neoracer_ros2_driver"
 LIDAR_NAME="lakibeam1"
+
+# The driver's units, sudoers rules and setup_all.sh are written for this
+# account and home folder. Any other account ends the run before the erase.
+CAR_USER="racecar"
+CAR_HOME="/home/${CAR_USER}"
 
 WS_DIR="$HOME/ros2_ws"
 SRC_DIR="$WS_DIR/src"
 JUPYTER_WS="$HOME/jupyter_ws"
-DATA_DIR="$HOME/data"
 CAR_LOG_DIR="$HOME/logs"
 
-# Paths wiped by step 1, in removal order.
-WIPE_PATHS=("$JUPYTER_WS" "$WS_DIR" "$DATA_DIR" "$CAR_LOG_DIR")
+# The car's data root at driver 0.9.0: bags, maps, datasets, dashboard logs.
+# Never erased or created here; the driver's setup moves old data into it.
+DATA_ROOT="$HOME/neoracer_data"
+
+# Paths wiped by step 1, in removal order, for each choice of the reinstall
+# menu. Choice 1 keeps ~/jupyter_ws, the students' notebooks and labs. Choice 2
+# erases it too: step 1 moves it to a dated backup, then erases the rest.
+# WIPE_PATHS is set to one of the two once the choice is made.
+WIPE_PATHS_CHOICE_1=("$WS_DIR" "$CAR_LOG_DIR")
+WIPE_PATHS_CHOICE_2=("$JUPYTER_WS" "$WS_DIR" "$CAR_LOG_DIR")
 
 # Paths created by step 2.
-CREATE_PATHS=("$SRC_DIR" "$DATA_DIR" "$CAR_LOG_DIR")
+CREATE_PATHS=("$SRC_DIR" "$CAR_LOG_DIR")
 
-# Core systemd units installed by the driver's setup_services.sh.
+# Units the driver's setup_services.sh installs at 0.9.0. The core stack is
+# enabled at boot. Autonomy and the lab dashboards are installed and not
+# enabled: `racecar service start <name>` runs one for a session.
 CORE_SERVICES=(
     neoracer-teleop.service
     neoracer-watchdog.service
     neoracer-dashboard.service
     neoracer-jupyter.service
+    neoracer-data.service
+    neoracer-mapview.service
+)
+ONDEMAND_SERVICES=(
+    neoracer-autonomy.service
+)
+DASHBOARD_SERVICES=(
+    neoracer-camlabel.service
+    neoracer-wallfollow.service
+    neoracer-pursuit.service
+    neoracer-eps.service
+    neoracer-smartfollow.service
+    neoracer-linefollow.service
+    neoracer-webteleop.service
+)
+ALL_SERVICES=("${CORE_SERVICES[@]}" "${ONDEMAND_SERVICES[@]}" "${DASHBOARD_SERVICES[@]}")
+
+# Files setup_services.sh installs outside the home folder: the sudo rules that
+# let racecar start and stop the units above, and the login-shell hook that
+# exports the data root.
+SUDOERS_FILE="/etc/sudoers.d/neoracer"
+PROFILE_FILE="/etc/profile.d/neoracer-data.sh"
+
+# The folder where setup_services.sh installs the unit files.
+UNIT_DIR="/etc/systemd/system"
+
+# ROS packages the driver's setup_ros2.sh installs beyond ros-base, checked
+# after the run. Mapping and navigation joined the list at 0.9.0.
+DRIVER_ROS_PKGS=(
+    ros-humble-ackermann-msgs
+    ros-humble-cv-bridge
+    ros-humble-foxglove-bridge
+    ros-humble-slam-toolbox
+    ros-humble-nav2-map-server
+    ros-humble-nav2-amcl
+    ros-humble-nav2-lifecycle-manager
+    ros-humble-robot-state-publisher
+    ros-humble-xacro
+    ros-humble-rosbag2-storage-mcap
 )
 
 # Get the full path of the current script
@@ -55,15 +117,33 @@ usage() {
 
 Usage: bash neoracer-installer/scripts/install.sh [options]
 
+Before the erase, a run with a terminal shows this menu:
+  1) The driver and the student library. ~/jupyter_ws remains.
+  2) Everything. ~/jupyter_ws is erased too, and the newest labs are installed.
+Pressing Enter picks 1. A typed 'yes' then confirms the erase.
+
 Options:
-  -y, --yes       Skip the confirmation prompt before erasing car software.
+  -y, --yes       Reinstall everything (choice 2) with no questions. The menu
+                  and the confirmation prompt are skipped. A real run without
+                  a terminal needs this option.
       --dry-run   Print every action without erasing, cloning, or installing.
+                  With a terminal and no -y, the menu is shown and the plan
+                  follows the choice. Without a terminal, the plan is choice 2.
   -h, --help      Show this message.
 
+Environment:
+  DRIVER_REF      Branch or tag of the driver to clone instead of the default
+                  branch, to test an unreleased revision. Example:
+                  DRIVER_REF=port/mit-0.9.0 bash neoracer-installer/scripts/install.sh
+  DRIVER_URL      Another driver repository, such as a fork.
+
 Steps:
-  [1/3] Remove ~/jupyter_ws, ~/ros2_ws, ~/data, ~/logs
-  [2/3] Create ~/ros2_ws/src, ~/data, ~/logs
-  [3/3] Clone the driver and run scripts/setup_all.sh
+  [1/3] Stop the neoracer services. In choice 2, move ~/jupyter_ws to
+        ~/jupyter_ws-backup-YYYYMMDD-HHMMSS. Disable and remove the
+        neoracer unit files. Remove ~/ros2_ws and ~/logs.
+  [2/3] Create ~/ros2_ws/src, ~/logs
+  [3/3] Clone the driver and run scripts/setup_all.sh. Choice 1 runs it
+        with RACECAR_LABS_REFRESH=0, so the labs stay as they are.
 
 Every run is logged to neoracer-installer/logs/.
 USAGEEOF
@@ -183,6 +263,11 @@ describe_checkout() {
     fi
 }
 
+# The driver's release number, from the <version> tag in its package.xml.
+driver_pkg_version() {
+    sed -n 's/.*<version>\([^<]*\)<\/version>.*/\1/p' "$1/package.xml" 2>/dev/null | head -1
+}
+
 # Device-tree strings are NUL-terminated.
 dt_read() {
     [ -r "$1" ] && tr -d '\0' < "$1"
@@ -290,12 +375,14 @@ PYEOF
         emit "ws.driver_branch" "$(git -C "$driver_dir" rev-parse --abbrev-ref HEAD 2>/dev/null)"
         emit "ws.driver_commit_date" "$(git -C "$driver_dir" log -1 --format='%cs' 2>/dev/null)"
         emit "ws.driver_dirty" "$([ -n "$(git -C "$driver_dir" status --porcelain 2>/dev/null)" ] && echo yes || echo no)"
+        emit "ws.driver_pkg_version" "$(driver_pkg_version "$driver_dir")"
     else
         emit "ws.driver_rev" "absent"
         emit "ws.driver_version" "absent"
         emit "ws.driver_branch" "absent"
         emit "ws.driver_commit_date" "absent"
         emit "ws.driver_dirty" "absent"
+        emit "ws.driver_pkg_version" "absent"
     fi
     if [ -d "${SRC_DIR}/${LIDAR_NAME}/.git" ]; then
         emit "ws.lidar_rev" "$(git -C "${SRC_DIR}/${LIDAR_NAME}" describe --tags --always 2>/dev/null)"
@@ -305,12 +392,12 @@ PYEOF
     emit "ws.installed_packages" "$(ls -1 "${ws_dir}/install" 2>/dev/null | grep -cv '^\(setup\.\|local_setup\|_local_setup\|COLCON_IGNORE\)' )"
 
     local path
-    for path in "$JUPYTER_WS" "$WS_DIR" "$DATA_DIR" "$CAR_LOG_DIR"; do
+    for path in "$JUPYTER_WS" "$WS_DIR" "$CAR_LOG_DIR" "$DATA_ROOT"; do
         emit "dir.$(basename "$path").size_kb" "$(du -sk "$path" 2>/dev/null | cut -f1)"
     done
 
     local svc
-    for svc in "${CORE_SERVICES[@]}"; do
+    for svc in "${ALL_SERVICES[@]}"; do
         emit "svc.${svc%.service}.enabled" "$(systemctl is-enabled "$svc" 2>/dev/null || echo absent)"
         emit "svc.${svc%.service}.active" "$(systemctl is-active "$svc" 2>/dev/null || echo inactive)"
     done
@@ -408,6 +495,25 @@ if [ "$(id -u)" -eq 0 ]; then
     exit 1
 fi
 
+# At 0.9.0 the driver's setup_all.sh stops for any user other than racecar or
+# any home other than /home/racecar. Checked here, so the car is not erased
+# first and left with nothing rebuilt. A dry run reports it and continues.
+CURRENT_USER=$(id -un)
+if [ "$CURRENT_USER" != "$CAR_USER" ] || [ "$HOME" != "$CAR_HOME" ]; then
+    if [ "$DRY_RUN" = true ]; then
+        log "  [dry-run] a real run would stop here: user ${CURRENT_USER}, home ${HOME}; the driver is set up for user ${CAR_USER} with home ${CAR_HOME}"
+    else
+        echo -e "\e[1;31m[ERROR] This installer runs as the ${CAR_USER} user with home ${CAR_HOME}.\e[0m"
+        log "This is user ${CURRENT_USER} with home ${HOME}."
+        log "The driver's services and sudo rules name ${CAR_USER}, so its setup stops on any other account."
+        log "Nothing has been removed."
+        log_silent "========== INSTALL LOG END (ABORTED: not the ${CAR_USER} user) =========="
+        exit 1
+    fi
+else
+    log "  [OK] running as ${CAR_USER} with home ${CAR_HOME}"
+fi
+
 MISSING_TOOLS=""
 for tool in git curl bash sudo; do
     command -v "$tool" >/dev/null 2>&1 || MISSING_TOOLS="${MISSING_TOOLS} ${tool}"
@@ -446,8 +552,27 @@ if [ "$DRY_RUN" = false ]; then
         exit 1
     fi
     log "  [OK] driver repository reachable"
+    if [ -n "$DRIVER_REF" ]; then
+        # A branch is one line. An annotated tag is two: the tag object and the
+        # peeled commit (^{}); the commit is what the clone's HEAD will equal.
+        DRIVER_REMOTE_HEAD=$(GIT_TERMINAL_PROMPT=0 git ls-remote "$DRIVER_URL" \
+            "refs/heads/${DRIVER_REF}" "refs/tags/${DRIVER_REF}^{}" "refs/tags/${DRIVER_REF}" 2>/dev/null \
+            | awk '$2 ~ /\^\{\}$/ {peeled=$1} $2 !~ /\^\{\}$/ && !first {first=$1} END {print (peeled ? peeled : first)}')
+        if [ -z "$DRIVER_REMOTE_HEAD" ]; then
+            echo -e "\e[1;31m[ERROR] No branch or tag named '${DRIVER_REF}' at the driver repository.\e[0m"
+            log "  $DRIVER_URL"
+            log "DRIVER_REF names a branch or a tag, not a commit."
+            log "Nothing has been removed."
+            log_silent "========== INSTALL LOG END (ABORTED: DRIVER_REF not found) =========="
+            exit 1
+        fi
+        log "  [OK] DRIVER_REF ${DRIVER_REF} resolves to ${DRIVER_REMOTE_HEAD:0:7}"
+    fi
 else
     log "  [dry-run] skipping driver repository reachability check"
+    if [ -n "$DRIVER_REF" ]; then
+        log "  [dry-run] DRIVER_REF=${DRIVER_REF} would be cloned instead of the default branch"
+    fi
 fi
 
 # ============================================================================
@@ -463,6 +588,8 @@ DRIVER_REV_BEFORE="${DRIVER_VERSION_BEFORE%% *}"
 # prefix is ambiguous, so short forms are for display only.
 DRIVER_SHA_BEFORE=$(git -C "${SRC_DIR}/${DRIVER_NAME}" rev-parse HEAD 2>/dev/null)
 DRIVER_REMOTE_SHORT="${DRIVER_REMOTE_HEAD:0:7}"
+DRIVER_SOURCE="remote HEAD"
+[ -n "$DRIVER_REF" ] && DRIVER_SOURCE="${DRIVER_REF}, set by DRIVER_REF"
 
 log ""
 echo -e "\e[1;36m==========================================================================\e[0m"
@@ -477,16 +604,16 @@ fi
 if [ "$DRY_RUN" = true ]; then
     log "  incoming:   not checked (dry run)"
 elif [ -z "$DRIVER_VERSION_BEFORE" ]; then
-    log "  incoming:   ${DRIVER_REMOTE_SHORT} (remote HEAD)"
+    log "  incoming:   ${DRIVER_REMOTE_SHORT} (${DRIVER_SOURCE})"
     log "  status:     first install"
 elif [ "$DRIVER_SHA_BEFORE" = "$DRIVER_REMOTE_HEAD" ]; then
-    log "  incoming:   ${DRIVER_REMOTE_SHORT} (remote HEAD)"
+    log "  incoming:   ${DRIVER_REMOTE_SHORT} (${DRIVER_SOURCE})"
     log "  status:     already at the newest revision; the run rebuilds it from scratch"
 else
-    log "  incoming:   ${DRIVER_REMOTE_SHORT} (remote HEAD)"
+    log "  incoming:   ${DRIVER_REMOTE_SHORT} (${DRIVER_SOURCE})"
     log "  status:     update available (${DRIVER_REV_BEFORE} -> ${DRIVER_REMOTE_SHORT})"
 fi
-log_silent "Driver remote HEAD: ${DRIVER_REMOTE_HEAD:-unknown}"
+log_silent "Driver incoming revision: ${DRIVER_REMOTE_HEAD:-unknown} (${DRIVER_SOURCE})"
 
 # The driver's setup scripts call sudo throughout. Prompt for the password now,
 # while the car still has its old software, instead of 20 minutes in.
@@ -510,23 +637,107 @@ fi
 cd "$HOME" || exit 1
 
 # ============================================================================
+# Reinstall choice
+#
+# Choice 1 reinstalls the driver and the student library. ~/jupyter_ws, with
+# the students' notebooks and labs, stays as it is. Choice 2 reinstalls
+# everything: step 1 moves ~/jupyter_ws to a dated backup, and the driver's
+# setup makes a new one with the newest labs. The menu is shown only when
+# stdin is a terminal and -y is not set. -y means choice 2 with no questions.
+# A run with no terminal and no -y stops at the confirmation below, as it
+# always has, and a dry run with no terminal plans choice 2.
+# ============================================================================
+REINSTALL_CHOICE=""
+if [ "$ASSUME_YES" = true ]; then
+    REINSTALL_CHOICE=2
+    log ""
+    log "This run reinstalls everything (choice 2). --yes skips the menu."
+    log_silent "Reinstall choice: 2 (set by --yes)"
+elif [ -t 0 ]; then
+    log ""
+    log "What should this run reinstall?"
+    log "  1) The driver and the student library. ~/jupyter_ws remains."
+    log "  2) Everything. ~/jupyter_ws is erased too, and the newest labs are installed."
+    while [ -z "$REINSTALL_CHOICE" ]; do
+        echo -n "Choose 1 or 2 [1]: "
+        if ! read -r CHOICE_ANSWER; then
+            echo ""
+            log "No choice was made. Nothing has been removed."
+            log_silent "========== INSTALL LOG END (ABORTED: no reinstall choice) =========="
+            exit 1
+        fi
+        log_silent "Reinstall menu answer: '${CHOICE_ANSWER}'"
+        case "$CHOICE_ANSWER" in
+            ""|1) REINSTALL_CHOICE=1 ;;
+            2)    REINSTALL_CHOICE=2 ;;
+        esac
+    done
+    log_silent "Reinstall choice: ${REINSTALL_CHOICE} (menu)"
+else
+    REINSTALL_CHOICE=2
+    if [ "$DRY_RUN" = true ]; then
+        log ""
+        log "  [dry-run] there is no terminal for the menu, so the run plans choice 2, as --yes does"
+    fi
+    log_silent "Reinstall choice: 2 (no terminal)"
+fi
+
+if [ "$REINSTALL_CHOICE" = 1 ]; then
+    WIPE_PATHS=("${WIPE_PATHS_CHOICE_1[@]}")
+else
+    WIPE_PATHS=("${WIPE_PATHS_CHOICE_2[@]}")
+fi
+
+# Choice 1 keeps the labs only on a car that has them. On a new card, the
+# driver setup installs the newest labs, and the summary says so.
+LABS_KEPT=false
+if [ "$REINSTALL_CHOICE" = 1 ] && [ -d "${JUPYTER_WS}/neoracer-os/labs" ]; then
+    LABS_KEPT=true
+fi
+
+# ============================================================================
 # Confirmation
 # ============================================================================
 log ""
 echo -e "\e[33m=========================================================================="
 log "[WARNING] The following directories will be erased:"
 echo "=========================================================================="
+# ~/jupyter_ws is listed only in choice 2, and that run moves it to a backup
+# instead of erasing it, so its line says so.
 for path in "${WIPE_PATHS[@]}"; do
     if [ -e "$path" ]; then
         SIZE=$(du -sh "$path" 2>/dev/null | cut -f1)
-        log "  ${path}  (${SIZE:-unknown size})"
+        if [ "$path" = "$JUPYTER_WS" ]; then
+            log "  ${path}  (${SIZE:-unknown size})  (moved to a dated backup first)"
+        else
+            log "  ${path}  (${SIZE:-unknown size})"
+        fi
     else
         log "  ${path}  (not present)"
     fi
 done
 echo ""
-echo "Anything you saved in these folders, including notebooks in ~/jupyter_ws"
-echo "and recordings in ~/data, is gone for good. Back them up first."
+if [ "$REINSTALL_CHOICE" = 1 ]; then
+    log "Anything you saved in these folders is gone for good, such as the"
+    log "tuning saved inside old lab dashboard checkouts under ~/ros2_ws."
+    log "Back it up first."
+    echo ""
+    log "Kept: ~/jupyter_ws (notebooks and labs), ${DATA_ROOT} (bags, maps,"
+    log "datasets), ~/.config/racecar (the car profile) and ~/osracer_ws (the"
+    log "vendor workspace)."
+else
+    log "Anything you saved in ~/ros2_ws or ~/logs is gone for good, such as the"
+    log "tuning saved inside old lab dashboard checkouts under ~/ros2_ws. Back it up"
+    log "first. ~/jupyter_ws is moved to ~/jupyter_ws-backup-YYYYMMDD-HHMMSS before"
+    log "the erase. Its notebooks stay there until someone deletes the folder."
+    echo ""
+    log "Kept: ${DATA_ROOT} (bags, maps, datasets), ~/.config/racecar (the car"
+    log "profile) and ~/osracer_ws (the vendor workspace)."
+fi
+echo ""
+log "Services go back to their defaults. A service you turned off starts at boot again."
+echo ""
+log "A car that already runs the driver keeps everything with: racecar update"
 echo -e "==========================================================================\e[0m"
 log ""
 
@@ -536,7 +747,8 @@ elif [ "$DRY_RUN" = true ]; then
     log "Confirmation skipped (--dry-run)."
 elif [ ! -t 0 ]; then
     echo -e "\e[1;31m[ERROR] No terminal available to confirm the erase.\e[0m"
-    log "Re-run with -y to confirm non-interactively."
+    log "Run it from a terminal to choose in the menu. Over ssh, connect with ssh -t."
+    log "Or re-run with -y, which reinstalls everything (choice 2) with no questions."
     log_silent "========== INSTALL LOG END (ABORTED: cannot confirm) =========="
     exit 1
 else
@@ -601,18 +813,132 @@ remove_path() {
     return 1
 }
 
+# Choice 2 keeps the old ~/jupyter_ws in a dated folder beside it, named the
+# way the driver names its labs backups: ~/jupyter_ws-backup-YYYYMMDD-HHMMSS.
+# The folder is moved, not copied, because step 1 erases it right after. A
+# move inside one folder on one disk is a rename, which completes in full or
+# changes nothing. A name that exists already stops the backup, so a backup
+# never lands inside an older one. Old backups stay until someone deletes
+# them. JUPYTER_BACKUP is set to the new path. It stays empty when there is no
+# ~/jupyter_ws to back up.
+backup_jupyter_ws() {
+    JUPYTER_BACKUP=""
+    if [ ! -e "$JUPYTER_WS" ] && [ ! -L "$JUPYTER_WS" ]; then
+        log "  [ -- ] ${JUPYTER_WS} (not present, so no backup is needed)"
+        return 0
+    fi
+
+    local target
+    target="${JUPYTER_WS}-backup-$(date +%Y%m%d-%H%M%S)"
+    if [ -e "$target" ] || [ -L "$target" ]; then
+        log "  [FAIL] ${target} exists already. A backup never goes inside an older one."
+        log_silent "WARNING: backup folder exists already: ${target}"
+        return 1
+    fi
+
+    if [ "$DRY_RUN" = true ]; then
+        log "  [dry-run] would move ${JUPYTER_WS} to ${target}"
+        JUPYTER_BACKUP="$target"
+        return 0
+    fi
+
+    log_silent "MOVING: ${JUPYTER_WS} -> ${target}"
+    mv -- "$JUPYTER_WS" "$target" >>"$LOG_FILE" 2>&1
+    local rc=$?
+    if [ $rc -eq 0 ]; then
+        JUPYTER_BACKUP="$target"
+        log "  [ OK ] moved ${JUPYTER_WS} to ${target}"
+        return 0
+    fi
+    log "  [FAIL] could not move ${JUPYTER_WS} to ${target}"
+    log_silent "WARNING: Command exited with code ${rc}: mv -- ${JUPYTER_WS} ${target}"
+    return 1
+}
+
+# Each installed neoracer unit is disabled and its unit file removed before the
+# erase, in both choices. The driver's setup then installs every unit as new.
+# Setup enables a core unit only when its unit file is new on that run, so the
+# core units start at boot again, and autonomy and the lab dashboards are
+# installed and not enabled. Each unit is disabled before its file goes, so no
+# boot link is left behind to start the reinstalled unit at boot. A unit file
+# that is a link to a missing file has nothing to disable, so it is only
+# removed. A boot link whose unit file is gone already is removed too, because
+# it would start the reinstalled unit of that name at boot. The vendor
+# jupyterlab.service and /etc/sudoers.d/neoracer are left alone.
+remove_unit_files() {
+    local unit svc link found=0
+    for unit in "$UNIT_DIR"/neoracer-*.service; do
+        [ -e "$unit" ] || [ -L "$unit" ] || continue
+        found=1
+        svc=$(basename "$unit")
+        if [ "$DRY_RUN" = true ]; then
+            [ -e "$unit" ] && log "  [dry-run] would disable ${svc}"
+            log "  [dry-run] would remove ${unit}"
+            continue
+        fi
+        if [ -e "$unit" ]; then
+            log "  disabling ${svc}"
+            sudo systemctl disable "$svc" >>"$LOG_FILE" 2>&1 \
+                || log_silent "WARNING: Command exited with code $?: systemctl disable ${svc}"
+        fi
+        log "  removing ${unit}"
+        sudo rm -f -- "$unit" >>"$LOG_FILE" 2>&1 \
+            || log_silent "WARNING: Command exited with code $?: rm -f ${unit}"
+    done
+
+    # disable above removed the boot links of each unit that had a file. A
+    # link whose unit file is still there in a dry run is one disable removes.
+    for link in "$UNIT_DIR"/*.wants/neoracer-*.service "$UNIT_DIR"/*.requires/neoracer-*.service; do
+        [ -L "$link" ] || continue
+        [ -e "${UNIT_DIR}/$(basename "$link")" ] && continue
+        found=1
+        if [ "$DRY_RUN" = true ]; then
+            log "  [dry-run] would remove ${link}"
+            continue
+        fi
+        log "  removing ${link}"
+        sudo rm -f -- "$link" >>"$LOG_FILE" 2>&1 \
+            || log_silent "WARNING: Command exited with code $?: rm -f ${link}"
+    done
+    [ "$found" = 1 ] || return 0
+
+    if [ "$DRY_RUN" = true ]; then
+        log "  [dry-run] would run systemctl daemon-reload"
+        return 0
+    fi
+    log "  reloading the systemd unit files"
+    sudo systemctl daemon-reload >>"$LOG_FILE" 2>&1 \
+        || log_silent "WARNING: Command exited with code $?: systemctl daemon-reload"
+}
+
+# A run that stops before the erase starts the units it stopped again, so the
+# car keeps running its old software.
+restart_stopped_services() {
+    local svc
+    for svc in "${STOPPED_SERVICES[@]}"; do
+        log "  starting ${svc} again"
+        if ! sudo systemctl start "$svc" >>"$LOG_FILE" 2>&1; then
+            log "  [FAIL] ${svc} did not start. See: journalctl -u ${svc}"
+        fi
+    done
+}
+
 # Every running or restarting unit that holds files under the folders about to
-# go, stopped first so removal does not race a running node: the four core
-# services, the lab dashboards and autonomy (neoracer-*.service, installed by
-# the driver's setup_services.sh) and the vendor image's jupyterlab.service,
-# which serves ~/jupyter_ws until the driver's phase 8 retires it. A unit
-# waiting out its RestartSec after a crash is "activating", not "active", so
-# both states are listed; stopping it also cancels the pending restart.
-# Stopped, not disabled: the driver's setup decides what runs at boot.
+# go, stopped first so removal does not race a running node: the core stack
+# (six units at 0.9.0), the lab dashboards and autonomy (neoracer-*.service,
+# installed by the driver's setup_services.sh) and the vendor image's
+# jupyterlab.service, which serves ~/jupyter_ws until the driver's phase 8
+# retires it. A unit waiting out its RestartSec after a crash is "activating",
+# not "active", so both states are listed; stopping it also cancels the pending
+# restart. The neoracer units are then disabled and their unit files removed
+# (remove_unit_files), so the driver's setup installs each one as new and sets
+# what runs at boot. jupyterlab.service is only stopped; the driver's phase 8
+# disables it.
 running_services() {
     systemctl list-units --type=service --state=active,activating --plain --no-legend \
         'neoracer-*.service' 'jupyterlab.service' 2>/dev/null | awk '{print $1}'
 }
+STOPPED_SERVICES=()
 if command -v systemctl >/dev/null 2>&1; then
     while read -r svc; do
         [ -n "$svc" ] || continue
@@ -621,11 +947,32 @@ if command -v systemctl >/dev/null 2>&1; then
         else
             log "  stopping ${svc}"
             sudo systemctl stop "$svc" >>"$LOG_FILE" 2>&1
+            STOPPED_SERVICES+=("$svc")
         fi
     done < <(running_services)
 fi
 
+# Choice 2 moves ~/jupyter_ws to its backup before anything is erased. A failed
+# backup ends the run here. Nothing is erased yet, and the units stopped above
+# are started again.
+JUPYTER_BACKUP=""
+if [ "$REINSTALL_CHOICE" = 2 ] && ! backup_jupyter_ws; then
+    echo -e "\e[1;31m[ERROR] The backup of ${JUPYTER_WS} failed.\e[0m"
+    restart_stopped_services
+    log "Nothing has been removed."
+    log_silent "========== INSTALL LOG END (ABORTED: backup failed) =========="
+    exit 1
+fi
+
+# Both choices return the neoracer units to the driver's defaults. This comes
+# after the backup, so a run that stops there still has its units to start.
+if command -v systemctl >/dev/null 2>&1; then
+    remove_unit_files
+fi
+
+# In choice 2 the backup above has moved ~/jupyter_ws away, so the erase skips it.
 for path in "${WIPE_PATHS[@]}"; do
+    [ "$path" = "$JUPYTER_WS" ] && continue
     remove_path "$path"
 done
 
@@ -668,15 +1015,30 @@ if [ "$DRY_RUN" = false ] && ! cd "$SRC_DIR"; then
     exit 1
 fi
 
-log "Cloning ${DRIVER_URL}"
 CLONE_RC=0
-run_cmd git clone "$DRIVER_URL" || CLONE_RC=$?
+if [ -n "$DRIVER_REF" ]; then
+    log "Cloning ${DRIVER_URL} at ${DRIVER_REF}"
+    run_cmd git clone --branch "$DRIVER_REF" "$DRIVER_URL" || CLONE_RC=$?
+else
+    log "Cloning ${DRIVER_URL}"
+    run_cmd git clone "$DRIVER_URL" || CLONE_RC=$?
+fi
 
 SETUP_SCRIPT="${SRC_DIR}/${DRIVER_NAME}/scripts/setup_all.sh"
 SETUP_RC=0
 
+# Choice 1 keeps ~/jupyter_ws. The driver's setup leaves existing labs alone
+# unless RACECAR_LABS_REFRESH is 1. The command sets it to 0, so a value
+# exported in the shell cannot refresh the labs. Choice 2 sets nothing:
+# ~/jupyter_ws is gone, and the setup copies fresh labs.
+if [ "$REINSTALL_CHOICE" = 1 ]; then
+    SETUP_CMD=(env RACECAR_LABS_REFRESH=0 bash "$SETUP_SCRIPT")
+else
+    SETUP_CMD=(bash "$SETUP_SCRIPT")
+fi
+
 if [ "$DRY_RUN" = true ]; then
-    log "  [dry-run] bash ${SETUP_SCRIPT}"
+    log "  [dry-run] ${SETUP_CMD[*]}"
 elif [ "$CLONE_RC" -ne 0 ] || [ ! -f "$SETUP_SCRIPT" ]; then
     echo ""
     echo -e "\e[1;31m=========================================================================="
@@ -691,8 +1053,8 @@ elif [ "$CLONE_RC" -ne 0 ] || [ ! -f "$SETUP_SCRIPT" ]; then
     SETUP_RC=1
 else
     log ""
-    log "Running ${SETUP_SCRIPT}"
-    run_cmd bash "$SETUP_SCRIPT" || SETUP_RC=$?
+    log "Running ${SETUP_CMD[*]}"
+    run_cmd "${SETUP_CMD[@]}" || SETUP_RC=$?
     if [ "$SETUP_RC" -ne 0 ]; then
         echo ""
         echo -e "\e[1;31m[ERROR] The driver setup exited with code ${SETUP_RC}.\e[0m"
@@ -795,9 +1157,11 @@ for path in "${CREATE_PATHS[@]}"; do
     fi
 done
 
-# setup_jupyter.sh recreates ~/jupyter_ws, so a missing one means that phase
-# never ran.
-if [ -d "$JUPYTER_WS" ]; then
+# setup_jupyter.sh recreates ~/jupyter_ws after choice 2 erased it, so a
+# missing one means that phase never ran. Choice 1 kept the folder.
+if [ -d "$JUPYTER_WS" ] && [ "$REINSTALL_CHOICE" = 1 ]; then
+    check_pass "${JUPYTER_WS} present"
+elif [ -d "$JUPYTER_WS" ]; then
     check_pass "${JUPYTER_WS} recreated by the driver setup"
 else
     check_fail "${JUPYTER_WS} not found (JupyterLab phase did not run)"
@@ -830,6 +1194,19 @@ else
     check_fail "setup_all.sh missing from the checkout"
 fi
 
+# The installer's version follows the driver release it installs, so the two
+# share a major.minor. A different driver means this installer is ahead of or
+# behind the car, and the checks below describe a release the car is not on.
+DRIVER_PKG_VERSION=$(driver_pkg_version "${SRC_DIR}/${DRIVER_NAME}")
+INSTALLER_RELEASE="${INSTALLER_VERSION%.*}"
+if [ -z "$DRIVER_PKG_VERSION" ]; then
+    check_fail "driver version unreadable (${SRC_DIR}/${DRIVER_NAME}/package.xml)"
+elif [ "${DRIVER_PKG_VERSION%.*}" = "$INSTALLER_RELEASE" ]; then
+    check_pass "driver ${DRIVER_PKG_VERSION} matches installer ${INSTALLER_VERSION} (release ${INSTALLER_RELEASE})"
+else
+    check_fail "driver ${DRIVER_PKG_VERSION} does not match installer ${INSTALLER_VERSION}; this installer is for driver ${INSTALLER_RELEASE}.x"
+fi
+
 section "Step 3, phase 1-2: ROS2 Humble and dev tools"
 
 if [ -f /opt/ros/humble/setup.bash ]; then
@@ -845,13 +1222,13 @@ else
 fi
 
 MISSING_ROS_PKGS=""
-for pkg in ros-humble-ackermann-msgs ros-humble-cv-bridge ros-humble-foxglove-bridge; do
+for pkg in "${DRIVER_ROS_PKGS[@]}"; do
     dpkg -s "$pkg" >/dev/null 2>&1 || MISSING_ROS_PKGS="${MISSING_ROS_PKGS} ${pkg}"
 done
 if [ -z "$MISSING_ROS_PKGS" ]; then
-    check_pass "driver ROS packages installed (ackermann-msgs, cv-bridge, foxglove-bridge)"
+    check_pass "all ${#DRIVER_ROS_PKGS[@]} driver ROS packages installed (messages, bridges, SLAM, Nav2, robot model, mcap bags)"
 else
-    check_fail "missing ROS packages:${MISSING_ROS_PKGS}"
+    check_fail "missing ROS packages:${MISSING_ROS_PKGS}; re-run scripts/setup_ros2.sh"
 fi
 
 MISSING_TOOLS=""
@@ -996,20 +1373,79 @@ else
     check_fail "racecar_core not importable from a plain python3"
 fi
 
+# setup_jupyter.sh creates the data root's maps folder and links the root and
+# its maps into the JupyterLab file browser, which is rooted at ~/jupyter_ws.
+if [ -d "$DATA_ROOT" ]; then
+    check_pass "data root present (${DATA_ROOT}, kept across installs)"
+else
+    check_fail "data root ${DATA_ROOT} missing; re-run scripts/setup_jupyter.sh"
+fi
+
+for link in data maps; do
+    LINK_TARGET=$(readlink "${JUPYTER_WS}/${link}" 2>/dev/null)
+    if [ -n "$LINK_TARGET" ] && [ -d "${JUPYTER_WS}/${link}" ]; then
+        check_pass "~/jupyter_ws/${link} links to ${LINK_TARGET}"
+    else
+        check_fail "~/jupyter_ws/${link} is not a link to the data root; re-run scripts/setup_jupyter.sh"
+    fi
+done
+
 section "Step 3, phase 8: systemd services"
 
 if command -v systemctl >/dev/null 2>&1; then
     for svc in "${CORE_SERVICES[@]}"; do
         if [ ! -f "/etc/systemd/system/${svc}" ]; then
             check_fail "${svc} not installed"
-        elif systemctl is-enabled --quiet "$svc" 2>/dev/null; then
+        elif [ "$(systemctl is-enabled "$svc" 2>/dev/null)" = "enabled" ]; then
             check_pass "${svc} installed and enabled at boot"
         else
             check_fail "${svc} installed but not enabled"
         fi
     done
+
+    # Autonomy has no [Install] section, so is-enabled says "static"; a lab
+    # dashboard is installed disabled. Either way the unit must not start at boot.
+    for svc in "${ONDEMAND_SERVICES[@]}" "${DASHBOARD_SERVICES[@]}"; do
+        SVC_STATE=$(systemctl is-enabled "$svc" 2>/dev/null)
+        if [ ! -f "/etc/systemd/system/${svc}" ]; then
+            check_fail "${svc} not installed; re-run scripts/setup_services.sh"
+        elif [ "$SVC_STATE" = "enabled" ]; then
+            check_fail "${svc} is enabled at boot; the driver installs it for on-demand starts only"
+        else
+            check_pass "${svc} installed, not enabled at boot (${SVC_STATE:-no boot link})"
+        fi
+    done
+
+    # The vendor image's jupyterlab.service binds port 8888, the same port as
+    # neoracer-jupyter; setup_services.sh disables it.
+    if [ "$(systemctl is-enabled jupyterlab.service 2>/dev/null)" = "enabled" ]; then
+        check_fail "vendor jupyterlab.service still enabled; it takes port 8888 from neoracer-jupyter"
+    else
+        check_pass "vendor jupyterlab.service not enabled"
+    fi
 else
     check_warn "systemctl unavailable; cannot verify services"
+fi
+
+# setup_services.sh installs the sudo rules as root, mode 0440. /etc/sudoers.d
+# is readable by root only; sudo -n uses the password cached at preflight and
+# never prompts, so a dry run reports this check as not run.
+if SUDOERS_STAT=$(sudo -n stat -c '%a %U %G' "$SUDOERS_FILE" 2>/dev/null); then
+    if [ "$SUDOERS_STAT" = "440 root root" ]; then
+        check_pass "sudo rules installed (${SUDOERS_FILE}, mode 440, owner root)"
+    else
+        check_fail "${SUDOERS_FILE} has mode and owner '${SUDOERS_STAT}', expected '440 root root'"
+    fi
+elif [ "$DRY_RUN" = true ]; then
+    check_warn "${SUDOERS_FILE} not checked (needs sudo; dry run)"
+else
+    check_fail "${SUDOERS_FILE} missing; re-run scripts/setup_services.sh"
+fi
+
+if [ -f "$PROFILE_FILE" ]; then
+    check_pass "login shells export the data root (${PROFILE_FILE})"
+else
+    check_fail "${PROFILE_FILE} missing; re-run scripts/setup_services.sh"
 fi
 
 section "Run log"
@@ -1046,11 +1482,28 @@ INSTALL_DURATION=$((INSTALL_END_TIME - INSTALL_START_TIME))
 INSTALL_MINUTES=$((INSTALL_DURATION / 60))
 INSTALL_SECONDS=$((INSTALL_DURATION % 60))
 
+# Choice 2 names the folder that holds the old ~/jupyter_ws.
+if [ -z "$JUPYTER_BACKUP" ]; then
+    SUMMARY_BACKUP="none; there was no ${JUPYTER_WS} to back up"
+elif [ "$DRY_RUN" = true ]; then
+    SUMMARY_BACKUP="${JUPYTER_BACKUP} (dry run, not made)"
+else
+    SUMMARY_BACKUP="$JUPYTER_BACKUP"
+fi
+
 log ""
 echo -e "\e[1;36m======================== INSTALLATION SUMMARY ========================\e[0m"
 echo -e "  Installer:        \e[1mv${INSTALLER_VERSION}\e[0m"
 echo -e "  Driver:           \e[1m${DRIVER_NAME} ${DRIVER_REV:-not cloned}\e[0m (was ${DRIVER_REV_BEFORE:-none})"
 echo -e "  Workspace:        \e[1m${WS_DIR}\e[0m"
+if [ "$LABS_KEPT" = true ]; then
+    echo -e "  Labs:             \e[1mkept as they were. Run 'racecar update --labs' to refresh them.\e[0m"
+elif [ "$REINSTALL_CHOICE" = 1 ]; then
+    echo -e "  Labs:             \e[1mnone to keep. The driver setup installs the newest labs.\e[0m"
+else
+    echo -e "  Backup:           \e[1m${SUMMARY_BACKUP}\e[0m"
+    echo -e "                    Old backups stay until someone deletes them."
+fi
 echo -e "  Checks:           \e[1m${PASS}/${TOTAL} passed, ${WARN} warning(s)\e[0m"
 echo -e "  Log file:         \e[1m${LOG_FILE}\e[0m"
 echo -e "  Duration:         \e[1m${INSTALL_MINUTES}m ${INSTALL_SECONDS}s\e[0m"
@@ -1060,6 +1513,14 @@ log_silent "======================== INSTALLATION SUMMARY ======================
 log_silent "  Installer:        v${INSTALLER_VERSION}"
 log_silent "  Driver:           ${DRIVER_NAME} ${DRIVER_REV:-not cloned} (was ${DRIVER_REV_BEFORE:-none})"
 log_silent "  Workspace:        ${WS_DIR}"
+if [ "$LABS_KEPT" = true ]; then
+    log_silent "  Labs:             kept as they were. Run 'racecar update --labs' to refresh them."
+elif [ "$REINSTALL_CHOICE" = 1 ]; then
+    log_silent "  Labs:             none to keep. The driver setup installs the newest labs."
+else
+    log_silent "  Backup:           ${SUMMARY_BACKUP}"
+    log_silent "                    Old backups stay until someone deletes them."
+fi
 log_silent "  Checks:           ${PASS}/${TOTAL} passed, ${WARN} warning(s)"
 log_silent "  Log file:         ${LOG_FILE}"
 log_silent "  Duration:         ${INSTALL_MINUTES}m ${INSTALL_SECONDS}s"
